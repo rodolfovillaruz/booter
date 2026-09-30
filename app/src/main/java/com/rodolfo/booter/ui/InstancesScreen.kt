@@ -45,6 +45,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -200,24 +201,29 @@ private fun InstanceRow(
     val latestOnStart by rememberUpdatedState(onStartRequest)
     val latestOnResize by rememberUpdatedState(onResizeRequest)
 
-    val swipeState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { target ->
-            when (target) {
-                SwipeToDismissBoxValue.EndToStart -> if (latestCanStart) latestOnStart()
-                SwipeToDismissBoxValue.StartToEnd -> if (latestCanResize) latestOnResize()
-                SwipeToDismissBoxValue.Settled -> Unit
-            }
-            false // always snap back; the dialog takes over from here
-        },
-    )
+    // SwipeToDismissBox only recomputes its swipe anchors on the next layout pass, so a
+    // direction that was enabled (e.g. "Start" while stopped) can linger after the state
+    // changes. Rebuilding the swipe box whenever the allowed directions change avoids that.
+    key(canStart, canResize) {
+        val swipeState = rememberSwipeToDismissBoxState(
+            confirmValueChange = { target ->
+                when (target) {
+                    SwipeToDismissBoxValue.EndToStart -> if (latestCanStart) latestOnStart()
+                    SwipeToDismissBoxValue.StartToEnd -> if (latestCanResize) latestOnResize()
+                    SwipeToDismissBoxValue.Settled -> Unit
+                }
+                false // always snap back; the dialog takes over from here
+            },
+        )
 
-    SwipeToDismissBox(
-        state = swipeState,
-        enableDismissFromStartToEnd = canResize,
-        enableDismissFromEndToStart = canStart,
-        backgroundContent = { SwipeBackground(swipeState.dismissDirection) },
-    ) {
-        InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onClick)
+        SwipeToDismissBox(
+            state = swipeState,
+            enableDismissFromStartToEnd = canResize,
+            enableDismissFromEndToStart = canStart,
+            backgroundContent = { SwipeBackground(swipeState.dismissDirection) },
+        ) {
+            InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onClick)
+        }
     }
 }
 
