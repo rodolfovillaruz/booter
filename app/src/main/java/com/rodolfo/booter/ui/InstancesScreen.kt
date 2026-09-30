@@ -2,6 +2,7 @@
 
 package com.rodolfo.booter.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,6 +53,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rodolfo.booter.aws.Ec2Instance
@@ -70,6 +74,19 @@ fun InstancesScreen(
 ) {
     var startTarget by remember { mutableStateOf<Ec2Instance?>(null) }
     var resizeTarget by remember { mutableStateOf<Ec2Instance?>(null) }
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+
+    fun copyPublicIp(instance: Ec2Instance) {
+        val ip = instance.publicIp
+        val message = if (ip == null) {
+            "${instance.displayName} has no public IP"
+        } else {
+            clipboard.setText(AnnotatedString(ip))
+            "IP address $ip copied to clipboard"
+        }
+        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+    }
 
     Scaffold(
         topBar = {
@@ -104,7 +121,7 @@ fun InstancesScreen(
             ) {
                 item {
                     Text(
-                        "Swipe left to start · swipe right on a running instance to resize",
+                        "Tap to copy public IP · swipe left to start · swipe right on a running instance to resize",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -126,6 +143,7 @@ fun InstancesScreen(
                         onStartRequest = { startTarget = instance },
                         onResizeRequest = { resizeTarget = instance },
                         onCancelResize = { onCancelResize(instance.id) },
+                        onClick = { copyPublicIp(instance) },
                     )
                 }
             }
@@ -171,6 +189,7 @@ private fun InstanceRow(
     onStartRequest: () -> Unit,
     onResizeRequest: () -> Unit,
     onCancelResize: () -> Unit,
+    onClick: () -> Unit,
 ) {
     val canStart = instance.state == "stopped" && !busy
     val canResize = instance.state == "running" && !busy && pendingSize == null
@@ -198,7 +217,7 @@ private fun InstanceRow(
         enableDismissFromEndToStart = canStart,
         backgroundContent = { SwipeBackground(swipeState.dismissDirection) },
     ) {
-        InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize)
+        InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onClick)
     }
 }
 
@@ -240,8 +259,9 @@ private fun InstanceCard(
     canStart: Boolean,
     onStartRequest: () -> Unit,
     onCancelResize: () -> Unit,
+    onClick: () -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,
