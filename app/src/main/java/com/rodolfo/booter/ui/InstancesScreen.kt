@@ -3,7 +3,11 @@
 package com.rodolfo.booter.ui
 
 import android.widget.Toast
+import androidx.compose.animation.core.animate
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -32,19 +37,19 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -53,13 +58,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.rodolfo.booter.aws.Ec2Instance
 import com.rodolfo.booter.aws.INSTANCE_SIZES
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlin.math.sign
 
 @Composable
 fun InstancesScreen(
@@ -181,6 +192,8 @@ fun InstancesScreen(
     state.shutdownNotice?.let { ShutdownNoticeDialog(it, onDismissShutdownNotice) }
 }
 
+private enum class SwipeDirection { Left, Right }
+
 @Composable
 private fun InstanceRow(
     instance: Ec2Instance,
@@ -191,43 +204,87 @@ private fun InstanceRow(
     onCancelResize: () -> Unit,
     onClick: () -> Unit,
 ) {
-    val canStart = instance.state == "stopped" && !busy
+    // A pending resize boots the instance on its own, so it can't be started or resized meanwhile.
+    val canStart = instance.state == "stopped" && !busy && pendingSize == null
     val canResize = instance.state == "running" && !busy && pendingSize == null
 
-    // The swipe state is remembered once, so read the latest values through these.
-    val latestCanStart by rememberUpdatedState(canStart)
-    val latestCanResize by rememberUpdatedState(canResize)
-    val latestOnStart by rememberUpdatedState(onStartRequest)
-    val latestOnResize by rememberUpdatedState(onResizeRequest)
-
-    val swipeState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { target ->
-            when (target) {
-                SwipeToDismissBoxValue.EndToStart -> if (latestCanStart) latestOnStart()
-                SwipeToDismissBoxValue.StartToEnd -> if (latestCanResize) latestOnResize()
-                SwipeToDismissBoxValue.Settled -> Unit
-            }
-            false // always snap back; the dialog takes over from here
-        },
-    )
-
-    SwipeToDismissBox(
-        state = swipeState,
-        enableDismissFromStartToEnd = canResize,
-        enableDismissFromEndToStart = canStart,
-        backgroundContent = { SwipeBackground(swipeState.dismissDirection) },
+    SwipeableRow(
+        canSwipeLeft = canStart,
+        canSwipeRight = canResize,
+        onSwipeLeft = onStartRequest,
+        onSwipeRight = onResizeRequest,
     ) {
         InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onClick)
     }
 }
 
+/**
+ * Horizontal swipe that fires an action instead of dismissing: past a quarter of the width
+ * (or on a fling) the action runs, and the row always slides back. Disabled directions
+ * don't move at all.
+ */
 @Composable
-private fun SwipeBackground(direction: SwipeToDismissBoxValue) {
+private fun SwipeableRow(
+    canSwipeLeft: Boolean,
+    canSwipeRight: Boolean,
+    onSwipeLeft: () -> Unit,
+    onSwipeRight: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val density = LocalDensity.current
+    val flingVelocity = with(density) { 800.dp.toPx() }
+    val minFlingDistance = with(density) { 32.dp.toPx() }
+    var width by remember { mutableIntStateOf(0) }
+    var offsetX by remember { mutableFloatStateOf(0f) }
+
+    val latestCanLeft by rememberUpdatedState(canSwipeLeft)
+    val latestCanRight by rememberUpdatedState(canSwipeRight)
+    val latestOnLeft by rememberUpdatedState(onSwipeLeft)
+    val latestOnRight by rememberUpdatedState(onSwipeRight)
+
+    val dragState = rememberDraggableState { delta ->
+        val min = if (latestCanLeft) -width.toFloat() else 0f
+        val max = if (latestCanRight) width.toFloat() else 0f
+        offsetX = (offsetX + delta).coerceIn(min, max)
+    }
+
+    Box(
+        modifier = Modifier
+            .onSizeChanged { width = it.width }
+            .draggable(
+                state = dragState,
+                orientation = Orientation.Horizontal,
+                enabled = canSwipeLeft || canSwipeRight,
+                onDragStopped = { velocity ->
+                    val farEnough = abs(offsetX) >= width * 0.25f
+                    val flung = abs(offsetX) >= minFlingDistance && abs(velocity) >= flingVelocity &&
+                        sign(velocity) == sign(offsetX)
+                    if (farEnough || flung) {
+                        if (offsetX > 0 && latestCanRight) latestOnRight()
+                        if (offsetX < 0 && latestCanLeft) latestOnLeft()
+                    }
+                    animate(offsetX, 0f) { value, _ -> offsetX = value }
+                },
+            ),
+    ) {
+        val direction = when {
+            offsetX > 0f -> SwipeDirection.Right
+            offsetX < 0f -> SwipeDirection.Left
+            else -> null
+        }
+        if (direction != null) {
+            Box(Modifier.matchParentSize()) { SwipeBackground(direction) }
+        }
+        Box(Modifier.offset { IntOffset(offsetX.roundToInt(), 0) }) { content() }
+    }
+}
+
+@Composable
+private fun SwipeBackground(direction: SwipeDirection) {
     val colors = MaterialTheme.colorScheme
     val (color, alignment) = when (direction) {
-        SwipeToDismissBoxValue.EndToStart -> colors.primaryContainer to Alignment.CenterEnd
-        SwipeToDismissBoxValue.StartToEnd -> colors.tertiaryContainer to Alignment.CenterStart
-        SwipeToDismissBoxValue.Settled -> return
+        SwipeDirection.Left -> colors.primaryContainer to Alignment.CenterEnd
+        SwipeDirection.Right -> colors.tertiaryContainer to Alignment.CenterStart
     }
     Box(
         modifier = Modifier
@@ -238,7 +295,7 @@ private fun SwipeBackground(direction: SwipeToDismissBoxValue) {
         contentAlignment = alignment,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (direction == SwipeToDismissBoxValue.EndToStart) {
+            if (direction == SwipeDirection.Left) {
                 Text("Start", color = colors.onPrimaryContainer)
                 Spacer(Modifier.width(8.dp))
                 Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = colors.onPrimaryContainer)
@@ -286,19 +343,19 @@ private fun InstanceCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 if (pendingSize != null) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "→ $pendingSize after shutdown",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.tertiary,
-                        )
-                        TextButton(onClick = onCancelResize) { Text("Cancel") }
-                    }
+                    Text(
+                        "→ $pendingSize after shutdown",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
                 }
             }
             Spacer(Modifier.width(8.dp))
             if (busy) {
                 CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+            } else if (pendingSize != null) {
+                // Start is unavailable while waiting for shutdown, so Cancel takes its slot.
+                OutlinedButton(onClick = onCancelResize) { Text("Cancel") }
             } else {
                 FilledTonalButton(onClick = onStartRequest, enabled = canStart) { Text("Start") }
             }
