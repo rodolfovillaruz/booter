@@ -1,10 +1,12 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 
 package com.rodolfo.booter.ui
 
 import android.widget.Toast
 import androidx.compose.animation.core.animate
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -66,6 +68,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import com.rodolfo.booter.SshBorg
 import com.rodolfo.booter.aws.Ec2Instance
 import com.rodolfo.booter.aws.INSTANCE_SIZES
 import kotlin.math.abs
@@ -95,6 +98,16 @@ fun InstancesScreen(
         } else {
             clipboard.setText(AnnotatedString(ip))
             "IP address $ip copied to clipboard"
+        }
+        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+    }
+
+    fun openInSshBorg(instance: Ec2Instance) {
+        val message = when {
+            instance.state != "running" -> "${instance.displayName} isn't running"
+            instance.publicIp == null -> "${instance.displayName} has no public IP"
+            SshBorg.open(context, instance) -> return
+            else -> "SSHBorg isn't installed"
         }
         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
     }
@@ -132,7 +145,7 @@ fun InstancesScreen(
             ) {
                 item {
                     Text(
-                        "Tap to copy public IP · swipe left to start · swipe right on a running instance to resize",
+                        "Tap to open in SSHBorg · long-press to copy public IP · swipe left to start · swipe right on a running instance to resize",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -154,7 +167,8 @@ fun InstancesScreen(
                         onStartRequest = { startTarget = instance },
                         onResizeRequest = { resizeTarget = instance },
                         onCancelResize = { onCancelResize(instance.id) },
-                        onClick = { copyPublicIp(instance) },
+                        onClick = { openInSshBorg(instance) },
+                        onLongClick = { copyPublicIp(instance) },
                     )
                 }
             }
@@ -203,6 +217,7 @@ private fun InstanceRow(
     onResizeRequest: () -> Unit,
     onCancelResize: () -> Unit,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     // A pending resize boots the instance on its own, so it can't be started or resized meanwhile.
     val canStart = instance.state == "stopped" && !busy && pendingSize == null
@@ -214,7 +229,7 @@ private fun InstanceRow(
         onSwipeLeft = onStartRequest,
         onSwipeRight = onResizeRequest,
     ) {
-        InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onClick)
+        InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onClick, onLongClick)
     }
 }
 
@@ -317,10 +332,13 @@ private fun InstanceCard(
     onStartRequest: () -> Unit,
     onCancelResize: () -> Unit,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+    Card(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             StateDot(instance.state)
