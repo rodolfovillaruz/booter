@@ -17,12 +17,13 @@ A personal Android app for booting EC2 instances.
 - **Resize** (swipe a **running** entry **right**): pick the other size. Booter then tells you to shut
   the instance down. Once the instance reports `stopped`, Booter changes the type and starts it
   again. This only happens while the app is open and unlocked; a pending resize survives restarts.
-- **Launch** (the button at the bottom right): name a new instance and pick its image, size, and key
-  pair. The images (the latest Amazon Linux 2023 and Ubuntu 24.04, plus your own x86_64 AMIs) and key
-  pairs are loaded live from the region. Everything else uses the defaults: the default VPC, subnet,
-  and security group, and the image's default disk. Shutting it down from inside the OS stops it
-  rather than terminating it. The default security group only allows traffic from itself, so you
-  have to open port 22 in it before SSHBorg can connect.
+- **Launch** (the button at the bottom right): name a new instance and pick its image, size, key
+  pair, and security group. The images (the latest Amazon Linux 2023 and Ubuntu 24.04, plus your own
+  x86_64 AMIs), key pairs, and the default VPC's security groups are loaded live from the region.
+  Each group shows whether it allows SSH, and the first one that does is preselected. If none does,
+  `default` is preselected, but it only allows traffic from itself, so SSHBorg can't connect. Everything
+  else uses the defaults: the default VPC and subnet, and the image's default disk. Shutting it down
+  from inside the OS stops it rather than terminating it.
 
 ## Build
 
@@ -45,7 +46,9 @@ fingerprint enrolled. minSdk is 28.
       "ec2:RunInstances",
       "ec2:CreateTags",
       "ec2:DescribeImages",
-      "ec2:DescribeKeyPairs"
+      "ec2:DescribeKeyPairs",
+      "ec2:DescribeVpcs",
+      "ec2:DescribeSecurityGroups"
     ],
     "Resource": "*"
   }]

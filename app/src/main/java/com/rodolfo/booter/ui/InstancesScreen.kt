@@ -89,7 +89,7 @@ fun InstancesScreen(
     onCancelResize: (String) -> Unit,
     onDismissShutdownNotice: () -> Unit,
     onOpenLaunch: () -> Unit,
-    onLaunch: (name: String, image: Ec2Image, size: String, keyName: String?) -> Unit,
+    onLaunch: (name: String, image: Ec2Image, size: String, keyName: String?, securityGroupId: String?) -> Unit,
     onRetryLaunchOptions: () -> Unit,
     onDismissLaunch: () -> Unit,
 ) {

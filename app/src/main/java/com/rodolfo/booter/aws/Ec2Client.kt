@@ -67,7 +67,21 @@ class Ec2Client(
             .sortedBy { it.lowercase() }
 
     /**
-     * Launches one instance into the default VPC, subnet, and security group. Reusing the same
+     * Security groups in the default VPC, which is where [runInstance] launches. The group named
+     * "default" comes first. Empty when the region has no default VPC.
+     */
+    suspend fun describeDefaultVpcSecurityGroups(): List<Ec2SecurityGroup> {
+        val vpcs = call("DescribeVpcs", mapOf("Filter.1.Name" to "isDefault", "Filter.1.Value.1" to "true"))
+        val vpcId = Ec2Xml.parseSetItems(vpcs, "vpcSet").firstNotNullOfOrNull { it["vpcId"] }
+            ?: return emptyList()
+        val xml = call("DescribeSecurityGroups", mapOf("Filter.1.Name" to "vpc-id", "Filter.1.Value.1" to vpcId))
+        return Ec2Xml.parseSecurityGroups(xml)
+            .sortedWith(compareBy({ it.name != "default" }, { it.name.lowercase() }))
+    }
+
+    /**
+     * Launches one instance into the default VPC and subnet, with the given security group (the
+     * VPC's default group when null). Reusing the same
      * [clientToken] makes a repeated call return the first launch instead of starting another.
      */
     suspend fun runInstance(
@@ -75,6 +89,7 @@ class Ec2Client(
         imageId: String,
         instanceType: String,
         keyName: String?,
+        securityGroupId: String?,
         clientToken: String,
     ): Ec2Instance {
         val params = buildMap {
@@ -86,6 +101,7 @@ class Ec2Client(
             // Booter's resize flow relies on a shutdown stopping the instance, never terminating it.
             put("InstanceInitiatedShutdownBehavior", "stop")
             keyName?.let { put("KeyName", it) }
+            securityGroupId?.let { put("SecurityGroupId.1", it) }
             if (name.isNotBlank()) {
                 put("TagSpecification.1.ResourceType", "instance")
                 put("TagSpecification.1.Tag.1.Key", "Name")

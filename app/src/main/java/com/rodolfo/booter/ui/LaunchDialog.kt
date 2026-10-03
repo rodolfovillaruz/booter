@@ -38,7 +38,7 @@ import com.rodolfo.booter.aws.INSTANCE_SIZES
 @Composable
 fun LaunchDialog(
     options: LaunchOptions,
-    onLaunch: (name: String, image: Ec2Image, size: String, keyName: String?) -> Unit,
+    onLaunch: (name: String, image: Ec2Image, size: String, keyName: String?, securityGroupId: String?) -> Unit,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -47,9 +47,15 @@ fun LaunchDialog(
     var imageId by rememberSaveable { mutableStateOf<String?>(null) }
     // "" means the user chose no key pair; null means they haven't picked yet.
     var keyChoice by rememberSaveable { mutableStateOf<String?>(null) }
+    var groupId by rememberSaveable { mutableStateOf<String?>(null) }
 
     val image = options.images.find { it.id == imageId } ?: options.images.firstOrNull()
     val keyName = (keyChoice ?: options.keyPairs.firstOrNull())?.takeIf { it.isNotEmpty() }
+    // Null only when the region has no default VPC; AWS then picks (and likely rejects) the launch.
+    // Until the user picks, prefer a group SSHBorg can get through.
+    val group = options.securityGroups.find { it.id == groupId }
+        ?: options.securityGroups.firstOrNull { it.allowsSsh }
+        ?: options.securityGroups.firstOrNull()
     val ready = !options.loading && options.error == null
 
     AlertDialog(
@@ -59,7 +65,7 @@ fun LaunchDialog(
             when {
                 options.loading -> Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
-                    Text("Loading images and key pairs…", modifier = Modifier.padding(start = 16.dp))
+                    Text("Loading images, key pairs, and security groups…", modifier = Modifier.padding(start = 16.dp))
                 }
 
                 options.error != null -> Text("Couldn't load launch options: ${options.error}")
@@ -110,8 +116,24 @@ fun LaunchDialog(
                         onPick = { keyChoice = it },
                     )
 
+                    if (group != null) {
+                        Picker(
+                            label = "Security group",
+                            selected = group.name,
+                            choices = options.securityGroups.map {
+                                it.id to "${it.name} · ${if (it.allowsSsh) "SSH open" else "no SSH"}"
+                            },
+                            supporting = if (group.allowsSsh) {
+                                "${group.id} · allows SSH"
+                            } else {
+                                "${group.id} · no inbound SSH rule, so SSHBorg can't connect"
+                            },
+                            onPick = { groupId = it },
+                        )
+                    }
+
                     Text(
-                        "Uses the default VPC, subnet, and security group, and the image's default disk.",
+                        "Uses the default VPC and subnet, and the image's default disk.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -123,7 +145,7 @@ fun LaunchDialog(
                 options.error != null -> TextButton(onClick = onRetry) { Text("Retry") }
                 options.launching -> CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
                 else -> TextButton(
-                    onClick = { image?.let { onLaunch(name, it, size, keyName) } },
+                    onClick = { image?.let { onLaunch(name, it, size, keyName, group?.id) } },
                     enabled = ready && image != null,
                 ) { Text("Launch") }
             }

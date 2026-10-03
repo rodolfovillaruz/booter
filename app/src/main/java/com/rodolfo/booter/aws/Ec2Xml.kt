@@ -132,6 +132,68 @@ internal object Ec2Xml {
         }
     }
 
+    /**
+     * Walks DescribeSecurityGroupsResponse, noting for each group whether any inbound rule opens
+     * TCP port 22 (or all traffic) to an IP range. Rules that only allow other groups don't count.
+     */
+    fun parseSecurityGroups(xml: String): List<Ec2SecurityGroup> {
+        val parser = newParser(xml)
+        val path = ArrayList<String>()
+        val groups = mutableListOf<Ec2SecurityGroup>()
+
+        var id: String? = null
+        var name: String? = null
+        var allowsSsh = false
+        var protocol: String? = null
+        var fromPort: Int? = null
+        var toPort: Int? = null
+        var hasRange = false
+
+        fun inGroup() = path.size >= 3 && path[1] == "securityGroupInfo" && path[2] == "item"
+        fun inRule() = inGroup() && path.size >= 5 && path[3] == "ipPermissions" && path[4] == "item"
+
+        while (true) {
+            when (parser.next()) {
+                XmlPullParser.START_TAG -> path += parser.name
+
+                XmlPullParser.TEXT -> {
+                    val text = parser.text.trim()
+                    if (text.isEmpty() || !inGroup()) continue
+                    val field = path.subList(3, path.size)
+                    when {
+                        field == listOf("groupId") -> id = text
+                        field == listOf("groupName") -> name = text
+                        !inRule() -> {}
+                        path.size == 6 && path[5] == "ipProtocol" -> protocol = text
+                        path.size == 6 && path[5] == "fromPort" -> fromPort = text.toIntOrNull()
+                        path.size == 6 && path[5] == "toPort" -> toPort = text.toIntOrNull()
+                        path.size == 8 && path[5] in setOf("ipRanges", "ipv6Ranges") -> hasRange = true
+                    }
+                }
+
+                XmlPullParser.END_TAG -> {
+                    if (inRule() && path.size == 5) {
+                        val coversSsh = protocol == "-1" ||
+                            (protocol == "tcp" && (fromPort ?: 0) <= 22 && 22 <= (toPort ?: 65535))
+                        if (coversSsh && hasRange) allowsSsh = true
+                        protocol = null
+                        fromPort = null
+                        toPort = null
+                        hasRange = false
+                    } else if (inGroup() && path.size == 3) {
+                        id?.let { groups += Ec2SecurityGroup(it, name ?: it, allowsSsh) }
+                        id = null
+                        name = null
+                        allowsSsh = false
+                    }
+                    path.removeAt(path.lastIndex)
+                }
+
+                XmlPullParser.END_DOCUMENT -> return groups
+            }
+        }
+    }
+
     /** Text of the first element named [tag], e.g. `value` in DescribeInstanceAttribute. */
     fun firstText(xml: String, tag: String): String? {
         val parser = newParser(xml)
