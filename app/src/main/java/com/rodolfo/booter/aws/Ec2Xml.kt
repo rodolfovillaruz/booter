@@ -97,6 +97,41 @@ internal object Ec2Xml {
         return InstancesPage(instances, nextToken)
     }
 
+    /**
+     * The direct child fields of each `item` in a top-level set, e.g. `imagesSet` in
+     * DescribeImagesResponse. Deeper nested sets are skipped.
+     */
+    fun parseSetItems(xml: String, setName: String): List<Map<String, String>> {
+        val parser = newParser(xml)
+        val path = ArrayList<String>()
+        val items = mutableListOf<Map<String, String>>()
+        var current: MutableMap<String, String>? = null
+
+        while (true) {
+            when (parser.next()) {
+                XmlPullParser.START_TAG -> {
+                    path += parser.name
+                    if (path.size == 3 && path[1] == setName && parser.name == "item") current = mutableMapOf()
+                }
+
+                XmlPullParser.TEXT -> {
+                    val text = parser.text.trim()
+                    if (text.isNotEmpty() && path.size == 4) current?.put(path[3], text)
+                }
+
+                XmlPullParser.END_TAG -> {
+                    if (path.size == 3 && current != null) {
+                        items += current
+                        current = null
+                    }
+                    path.removeAt(path.lastIndex)
+                }
+
+                XmlPullParser.END_DOCUMENT -> return items
+            }
+        }
+    }
+
     /** Text of the first element named [tag], e.g. `value` in DescribeInstanceAttribute. */
     fun firstText(xml: String, tag: String): String? {
         val parser = newParser(xml)
