@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -35,6 +36,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -69,6 +71,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.rodolfo.booter.SshBorg
+import com.rodolfo.booter.aws.Ec2Image
 import com.rodolfo.booter.aws.Ec2Instance
 import com.rodolfo.booter.aws.INSTANCE_SIZES
 import kotlin.math.abs
@@ -85,6 +88,10 @@ fun InstancesScreen(
     onResize: (Ec2Instance, String) -> Unit,
     onCancelResize: (String) -> Unit,
     onDismissShutdownNotice: () -> Unit,
+    onOpenLaunch: () -> Unit,
+    onLaunch: (name: String, image: Ec2Image, size: String, keyName: String?) -> Unit,
+    onRetryLaunchOptions: () -> Unit,
+    onDismissLaunch: () -> Unit,
 ) {
     var startTarget by remember { mutableStateOf<Ec2Instance?>(null) }
     var resizeTarget by remember { mutableStateOf<Ec2Instance?>(null) }
@@ -132,6 +139,13 @@ fun InstancesScreen(
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        floatingActionButton = {
+            ExtendedFloatingActionButton(
+                onClick = onOpenLaunch,
+                icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                text = { Text("Launch") },
+            )
+        },
     ) { padding ->
         PullToRefreshBox(
             isRefreshing = state.refreshing,
@@ -140,7 +154,8 @@ fun InstancesScreen(
         ) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(16.dp),
+                // Extra bottom room so the Launch button never covers the last row.
+                contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 88.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 item {
@@ -204,6 +219,8 @@ fun InstancesScreen(
     }
 
     state.shutdownNotice?.let { ShutdownNoticeDialog(it, onDismissShutdownNotice) }
+
+    state.launchOptions?.let { LaunchDialog(it, onLaunch, onRetryLaunchOptions, onDismissLaunch) }
 }
 
 private enum class SwipeDirection { Left, Right }

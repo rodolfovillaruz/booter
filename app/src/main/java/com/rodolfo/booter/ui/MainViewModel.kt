@@ -5,16 +5,20 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rodolfo.booter.aws.AwsCredentials
 import com.rodolfo.booter.aws.Ec2Client
+import com.rodolfo.booter.aws.Ec2Image
 import com.rodolfo.booter.aws.Ec2Instance
 import com.rodolfo.booter.data.PendingResizeStore
 import com.rodolfo.booter.security.CredentialVault
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import java.util.UUID
 import javax.crypto.Cipher
 
 data class ShutdownNotice(
@@ -22,6 +26,17 @@ data class ShutdownNotice(
     val size: String,
     /** null when the shutdown behavior couldn't be checked. */
     val terminatesOnShutdown: Boolean?,
+)
+
+/** The launch dialog's live options; the dialog is open while this is non-null in [UiState]. */
+data class LaunchOptions(
+    val loading: Boolean = true,
+    val images: List<Ec2Image> = emptyList(),
+    val keyPairs: List<String> = emptyList(),
+    val error: String? = null,
+    val launching: Boolean = false,
+    /** One per dialog, so a repeated Launch tap can't start a second instance. */
+    val clientToken: String = UUID.randomUUID().toString(),
 )
 
 data class UiState(
@@ -35,6 +50,7 @@ data class UiState(
     val busyIds: Set<String> = emptySet(),
     val pendingResizes: Map<String, String> = emptyMap(),
     val shutdownNotice: ShutdownNotice? = null,
+    val launchOptions: LaunchOptions? = null,
     val message: String? = null,
 )
 
@@ -163,6 +179,66 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         terminatesOnShutdown = behavior?.let { b -> b == "terminate" },
                     ),
                 )
+            }
+        }
+    }
+
+    // --- Launch --------------------------------------------------------------------------
+
+    fun openLaunch() {
+        val ec2 = client ?: return
+        _state.update { it.copy(launchOptions = LaunchOptions()) }
+        viewModelScope.launch { loadLaunchOptions(ec2) }
+    }
+
+    fun retryLaunchOptions() {
+        val ec2 = client ?: return
+        _state.update { it.copy(launchOptions = it.launchOptions?.copy(loading = true, error = null)) }
+        viewModelScope.launch { loadLaunchOptions(ec2) }
+    }
+
+    fun dismissLaunch() = _state.update { it.copy(launchOptions = null) }
+
+    fun launch(name: String, image: Ec2Image, size: String, keyName: String?) {
+        val ec2 = client ?: return
+        val options = _state.value.launchOptions ?: return
+        if (options.launching) return
+        _state.update { it.copy(launchOptions = options.copy(launching = true)) }
+        viewModelScope.launch {
+            try {
+                val instance = ec2.runInstance(name.trim(), image.id, size, keyName, options.clientToken)
+                _state.update { s ->
+                    val others = s.instances.filter { it.id != instance.id }
+                    s.copy(
+                        launchOptions = null,
+                        instances = (others + instance).sortedBy { it.displayName.lowercase() },
+                    )
+                }
+                showMessage("Launching ${instance.displayName} as $size")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(launchOptions = it.launchOptions?.copy(launching = false)) }
+                showMessage("Couldn't launch: ${e.message}")
+            }
+        }
+    }
+
+    private suspend fun loadLaunchOptions(ec2: Ec2Client) {
+        try {
+            val loaded = coroutineScope {
+                val images = async { ec2.describeLaunchImages() }
+                val keyPairs = async { ec2.describeKeyPairs() }
+                LaunchOptions(loading = false, images = images.await(), keyPairs = keyPairs.await())
+            }
+            _state.update { s ->
+                s.copy(launchOptions = s.launchOptions?.let { loaded.copy(clientToken = it.clientToken) })
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _state.update {
+                it.copy(launchOptions = it.launchOptions?.copy(loading = false, error = e.message ?: "Unknown error"))
             }
         }
     }

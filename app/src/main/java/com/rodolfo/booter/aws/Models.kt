@@ -12,6 +12,15 @@ data class Ec2Instance(
     val displayName: String get() = name?.takeIf { it.isNotBlank() } ?: id
 }
 
+data class Ec2Image(
+    val id: String,
+    val name: String,
+    /** ISO-8601, so it sorts as a string. */
+    val creationDate: String,
+    /** Short label for the picker, e.g. "Amazon Linux 2023" or "My AMI". */
+    val label: String,
+)
+
 class AwsException(val code: String, message: String) : Exception("$message ($code)")
 
 /** The only sizes Booter offers for now, with a short spec line for the picker. */

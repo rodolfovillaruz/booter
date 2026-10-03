@@ -1,6 +1,8 @@
 package com.rodolfo.booter.aws
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.net.URL
 import java.net.URLEncoder
@@ -40,6 +42,81 @@ class Ec2Client(
             "ModifyInstanceAttribute",
             mapOf("InstanceId" to instanceId, "InstanceType.Value" to instanceType),
         )
+    }
+
+    /**
+     * The images offered when launching: the latest Amazon Linux 2023 and Ubuntu 24.04 builds,
+     * then your own AMIs, newest first. All x86_64, since every size in [INSTANCE_SIZES] is.
+     */
+    suspend fun describeLaunchImages(): List<Ec2Image> = coroutineScope {
+        val amazonLinux = async { latestImage("amazon", "al2023-ami-2023.*-x86_64", "Amazon Linux 2023") }
+        val ubuntu = async {
+            latestImage(UBUNTU_OWNER, "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*", "Ubuntu 24.04")
+        }
+        val own = async {
+            describeImages("self", namePattern = null)
+                .map { it.copy(label = it.name) }
+                .sortedByDescending { it.creationDate }
+        }
+        listOfNotNull(amazonLinux.await(), ubuntu.await()) + own.await()
+    }
+
+    suspend fun describeKeyPairs(): List<String> =
+        Ec2Xml.parseSetItems(call("DescribeKeyPairs", emptyMap()), "keySet")
+            .mapNotNull { it["keyName"] }
+            .sortedBy { it.lowercase() }
+
+    /**
+     * Launches one instance into the default VPC, subnet, and security group. Reusing the same
+     * [clientToken] makes a repeated call return the first launch instead of starting another.
+     */
+    suspend fun runInstance(
+        name: String,
+        imageId: String,
+        instanceType: String,
+        keyName: String?,
+        clientToken: String,
+    ): Ec2Instance {
+        val params = buildMap {
+            put("ImageId", imageId)
+            put("InstanceType", instanceType)
+            put("MinCount", "1")
+            put("MaxCount", "1")
+            put("ClientToken", clientToken)
+            // Booter's resize flow relies on a shutdown stopping the instance, never terminating it.
+            put("InstanceInitiatedShutdownBehavior", "stop")
+            keyName?.let { put("KeyName", it) }
+            if (name.isNotBlank()) {
+                put("TagSpecification.1.ResourceType", "instance")
+                put("TagSpecification.1.Tag.1.Key", "Name")
+                put("TagSpecification.1.Tag.1.Value", name)
+            }
+        }
+        val launched = Ec2Xml.parseInstances(call("RunInstances", params)).instances.firstOrNull()
+            ?: throw AwsException("EmptyResponse", "AWS didn't return the new instance")
+        return launched.copy(name = name.takeIf { it.isNotBlank() })
+    }
+
+    private suspend fun latestImage(owner: String, namePattern: String, label: String): Ec2Image? =
+        describeImages(owner, namePattern).maxByOrNull { it.creationDate }?.copy(label = label)
+
+    private suspend fun describeImages(owner: String, namePattern: String?): List<Ec2Image> {
+        val params = buildMap {
+            put("Owner.1", owner)
+            put("Filter.1.Name", "architecture")
+            put("Filter.1.Value.1", "x86_64")
+            put("Filter.2.Name", "state")
+            put("Filter.2.Value.1", "available")
+            if (namePattern != null) {
+                put("Filter.3.Name", "name")
+                put("Filter.3.Value.1", namePattern)
+            }
+        }
+        return Ec2Xml.parseSetItems(call("DescribeImages", params), "imagesSet").mapNotNull { fields ->
+            val id = fields["imageId"] ?: return@mapNotNull null
+            val imageName = fields["name"] ?: id
+            Ec2Image(id = id, name = imageName, creationDate = fields["creationDate"].orEmpty(), label = imageName)
+        }
     }
 
     /** "stop" or "terminate" — what happens when the OS inside the instance shuts down. */
@@ -84,6 +161,8 @@ class Ec2Client(
 
     private companion object {
         const val API_VERSION = "2016-11-15"
+        /** Canonical's account, which publishes the official Ubuntu AMIs. */
+        const val UBUNTU_OWNER = "099720109477"
         const val CONTENT_TYPE = "application/x-www-form-urlencoded; charset=utf-8"
     }
 }
