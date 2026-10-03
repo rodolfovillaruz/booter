@@ -21,6 +21,13 @@ data class Ec2Image(
     val label: String,
 )
 
+data class Ec2SecurityGroup(
+    val id: String,
+    val name: String,
+    /** Whether an inbound rule lets some IP range reach TCP port 22. */
+    val allowsSsh: Boolean,
+)
+
 class AwsException(val code: String, message: String) : Exception("$message ($code)")
 
 /** The only sizes Booter offers for now, with a short spec line for the picker. */
