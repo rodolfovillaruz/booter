@@ -21,6 +21,14 @@ data class Ec2Image(
     val label: String,
 )
 
+data class Ec2KeyPair(
+    val name: String,
+    /** What kind of fingerprint this is depends on the key; see [SshPublicKey.matches]. */
+    val fingerprint: String?,
+    /** The OpenSSH line, "type base64 [name]". */
+    val publicKey: String?,
+)
+
 data class Ec2SecurityGroup(
     val id: String,
     val name: String,

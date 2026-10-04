@@ -2,6 +2,10 @@
 
 package com.rodolfo.booter.ui
 
+import android.content.ActivityNotFoundException
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,6 +27,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -30,7 +35,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.rodolfo.booter.SshBorg
 import com.rodolfo.booter.aws.Ec2Image
 import com.rodolfo.booter.aws.INSTANCE_SIZES
 
@@ -48,6 +55,9 @@ fun LaunchDialog(
     ) -> Unit,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
+    onSshBorgKey: (publicKey: String, label: String) -> Unit,
+    onImportKeyAs: (name: String) -> Unit,
+    onCancelKeyImport: () -> Unit,
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var size by rememberSaveable { mutableStateOf(INSTANCE_SIZES.keys.first()) }
@@ -57,8 +67,15 @@ fun LaunchDialog(
     var subnetId by rememberSaveable { mutableStateOf<String?>(null) }
     var groupId by rememberSaveable { mutableStateOf<String?>(null) }
 
+    // A key picked in SSHBorg selects the AWS key pair that holds it.
+    LaunchedEffect(options.keyPick) { options.keyPick?.let { keyChoice = it.name } }
+    val context = LocalContext.current
+    val sshBorgPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        SshBorg.pickedKey(result)?.let { (key, label) -> onSshBorgKey(key, label) }
+    }
+
     val image = options.images.find { it.id == imageId } ?: options.images.firstOrNull()
-    val keyName = (keyChoice ?: options.keyPairs.firstOrNull())?.takeIf { it.isNotEmpty() }
+    val keyName = (keyChoice ?: options.keyPairs.firstOrNull()?.name)?.takeIf { it.isNotEmpty() }
     // Null only when the region has no VPCs at all, and then there's nothing to launch into.
     val subnet = options.subnets.find { it.id == subnetId } ?: options.subnets.firstOrNull()
     // Groups belong to a VPC, so only the subnet's VPC's groups can be used. Until the user picks,
@@ -122,10 +139,27 @@ fun LaunchDialog(
                     Picker(
                         label = "Key pair",
                         selected = keyName ?: "No key pair",
-                        choices = options.keyPairs.map { it to it } + ("" to "No key pair"),
-                        supporting = if (keyName == null) "You won't be able to SSH in" else null,
-                        onPick = { keyChoice = it },
+                        choices = options.keyPairs.map { it.name to it.name } +
+                            ("" to "No key pair") + (FROM_SSHBORG to "Use a key from SSHBorg…"),
+                        supporting = when {
+                            options.keyBusy -> "Looking for your SSHBorg key in AWS…"
+                            keyName != null && keyName == options.keyPick?.name -> options.keyPick?.note
+                            keyName == null -> "You won't be able to SSH in"
+                            else -> null
+                        },
+                        onPick = {
+                            if (it != FROM_SSHBORG) {
+                                keyChoice = it
+                            } else {
+                                try {
+                                    sshBorgPicker.launch(SshBorg.pickKeyIntent())
+                                } catch (e: ActivityNotFoundException) {
+                                    Toast.makeText(context, "This SSHBorg can't share keys yet, or isn't installed", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
                     )
+                    options.keyError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
                     if (subnet == null) {
                         Text(
@@ -174,7 +208,7 @@ fun LaunchDialog(
                     onClick = {
                         if (image != null && subnet != null) onLaunch(name, image, size, keyName, subnet.id, group?.id)
                     },
-                    enabled = ready && image != null && subnet != null,
+                    enabled = ready && !options.keyBusy && image != null && subnet != null,
                 ) { Text("Launch") }
             }
         },
@@ -182,7 +216,47 @@ fun LaunchDialog(
             TextButton(onClick = onDismiss, enabled = !options.launching) { Text("Cancel") }
         },
     )
+
+    options.keyNamePrompt?.let { KeyNameDialog(it, options.keyBusy, onImportKeyAs, onCancelKeyImport) }
 }
+
+/** Asks what to call the SSHBorg key in AWS, since the name Booter wanted holds another key. */
+@Composable
+private fun KeyNameDialog(
+    prompt: KeyNamePrompt,
+    busy: Boolean,
+    onImport: (String) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var name by rememberSaveable(prompt.suggested) { mutableStateOf(prompt.suggested) }
+    AlertDialog(
+        onDismissRequest = { if (!busy) onCancel() },
+        title = { Text("Name the key in AWS") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("${prompt.error} Pick a name for your SSHBorg key \"${prompt.label}\".")
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Key pair name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            if (busy) {
+                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+            } else {
+                TextButton(onClick = { onImport(name) }, enabled = name.isNotBlank()) { Text("Add to AWS") }
+            }
+        },
+        dismissButton = { TextButton(onClick = onCancel, enabled = !busy) { Text("Cancel") } },
+    )
+}
+
+/** The key pair picker's entry that opens SSHBorg instead of naming a key pair. */
+private const val FROM_SSHBORG = "\u0000sshborg"
 
 /** A read-only dropdown; [choices] are (value, label) pairs. */
 @Composable

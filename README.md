@@ -26,6 +26,11 @@ A personal Android app for booting EC2 instances.
   itself, so SSHBorg can't connect. The instance always gets a public IP (it still needs a subnet
   routed to an internet gateway to be reachable) and the image's default disk. Shutting it down
   from inside the OS stops it rather than terminating it.
+- **Key from SSHBorg**: the key pair list ends with **Use a key from SSHBorg…**, which opens SSHBorg's
+  key list. Only the public half of the key you pick comes back. Booter looks for an AWS key pair
+  that already holds it, matched by fingerprint or public key, and selects it. If there isn't one,
+  Booter imports it, named after the key's SSHBorg label. If AWS already has a different key under
+  that name, Booter asks you for another name. AWS only accepts RSA and ED25519 keys.
 
 ## Build
 
@@ -49,6 +54,7 @@ fingerprint enrolled. minSdk is 28.
       "ec2:CreateTags",
       "ec2:DescribeImages",
       "ec2:DescribeKeyPairs",
+      "ec2:ImportKeyPair",
       "ec2:DescribeSubnets",
       "ec2:DescribeSecurityGroups"
     ],

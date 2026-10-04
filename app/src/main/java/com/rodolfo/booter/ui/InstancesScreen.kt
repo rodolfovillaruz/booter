@@ -99,6 +99,9 @@ fun InstancesScreen(
     ) -> Unit,
     onRetryLaunchOptions: () -> Unit,
     onDismissLaunch: () -> Unit,
+    onSshBorgKey: (publicKey: String, label: String) -> Unit,
+    onImportKeyAs: (name: String) -> Unit,
+    onCancelKeyImport: () -> Unit,
 ) {
     var startTarget by remember { mutableStateOf<Ec2Instance?>(null) }
     var resizeTarget by remember { mutableStateOf<Ec2Instance?>(null) }
@@ -227,7 +230,9 @@ fun InstancesScreen(
 
     state.shutdownNotice?.let { ShutdownNoticeDialog(it, onDismissShutdownNotice) }
 
-    state.launchOptions?.let { LaunchDialog(it, onLaunch, onRetryLaunchOptions, onDismissLaunch) }
+    state.launchOptions?.let {
+        LaunchDialog(it, onLaunch, onRetryLaunchOptions, onDismissLaunch, onSshBorgKey, onImportKeyAs, onCancelKeyImport)
+    }
 }
 
 private enum class SwipeDirection { Left, Right }

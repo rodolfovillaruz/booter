@@ -75,6 +75,9 @@ fun BooterApp(
             onLaunch = vm::launch,
             onRetryLaunchOptions = vm::retryLaunchOptions,
             onDismissLaunch = vm::dismissLaunch,
+            onSshBorgKey = vm::useSshBorgKey,
+            onImportKeyAs = vm::importKeyAs,
+            onCancelKeyImport = vm::cancelKeyImport,
         )
     }
 }

@@ -4,11 +4,14 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rodolfo.booter.aws.AwsCredentials
+import com.rodolfo.booter.aws.AwsException
 import com.rodolfo.booter.aws.Ec2Client
 import com.rodolfo.booter.aws.Ec2Image
 import com.rodolfo.booter.aws.Ec2Instance
+import com.rodolfo.booter.aws.Ec2KeyPair
 import com.rodolfo.booter.aws.Ec2SecurityGroup
 import com.rodolfo.booter.aws.Ec2Subnet
+import com.rodolfo.booter.aws.SshPublicKey
 import com.rodolfo.booter.data.PendingResizeStore
 import com.rodolfo.booter.security.CredentialVault
 import kotlinx.coroutines.CancellationException
@@ -30,15 +33,29 @@ data class ShutdownNotice(
     val terminatesOnShutdown: Boolean?,
 )
 
+/**
+ * The AWS key pair holding the key picked in SSHBorg, which the dialog selects. Not a data class,
+ * so picking the same key again is a new value and selects it again.
+ */
+class KeyPick(val name: String, val note: String)
+
+/** The SSHBorg key couldn't go in under the name Booter wanted, so the user names it. */
+data class KeyNamePrompt(val key: SshPublicKey, val label: String, val suggested: String, val error: String)
+
 /** The launch dialog's live options; the dialog is open while this is non-null in [UiState]. */
 data class LaunchOptions(
     val loading: Boolean = true,
     val images: List<Ec2Image> = emptyList(),
-    val keyPairs: List<String> = emptyList(),
+    val keyPairs: List<Ec2KeyPair> = emptyList(),
     val subnets: List<Ec2Subnet> = emptyList(),
     val securityGroups: List<Ec2SecurityGroup> = emptyList(),
     val error: String? = null,
     val launching: Boolean = false,
+    /** Looking for (or importing) the key picked in SSHBorg. */
+    val keyBusy: Boolean = false,
+    val keyPick: KeyPick? = null,
+    val keyError: String? = null,
+    val keyNamePrompt: KeyNamePrompt? = null,
     /** One per dialog, so a repeated Launch tap can't start a second instance. */
     val clientToken: String = UUID.randomUUID().toString(),
 )
@@ -237,6 +254,104 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Selects the AWS key pair holding the key the user picked in SSHBorg, matched by
+     * fingerprint or public key. When there isn't one, the key is imported, named after its
+     * SSHBorg label; if that name already holds a different key, the user is asked for another.
+     */
+    fun useSshBorgKey(publicKeyLine: String, label: String) {
+        val ec2 = client ?: return
+        val key = SshPublicKey.parse(publicKeyLine)
+        val problem = when {
+            key == null -> "SSHBorg sent a key Booter can't read"
+            !key.awsAccepts -> "AWS only takes RSA and ED25519 keys, and \"$label\" is ${key.type}"
+            else -> null
+        }
+        if (problem != null || key == null) {
+            updateLaunch { it.copy(keyError = problem) }
+            return
+        }
+        updateLaunch { it.copy(keyBusy = true, keyError = null) }
+        viewModelScope.launch {
+            try {
+                // Fresh, in case the key went in since the dialog opened.
+                val pairs = ec2.describeKeyPairs()
+                updateLaunch { it.copy(keyPairs = pairs) }
+                val match = pairs.firstOrNull { key.matches(it) }
+                val name = keyPairName(label)
+                when {
+                    match != null -> updateLaunch {
+                        it.copy(keyBusy = false, keyPick = KeyPick(match.name, "Your SSHBorg key \"$label\", already in AWS"))
+                    }
+                    pairs.any { it.name == name } -> askForKeyName(key, label, name, pairs)
+                    else -> importKey(ec2, key, name, label)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                updateLaunch { it.copy(keyBusy = false, keyError = "Couldn't check AWS key pairs: ${e.message}") }
+            }
+        }
+    }
+
+    /** Imports the key from [KeyNamePrompt] under the name the user typed. */
+    fun importKeyAs(name: String) {
+        val ec2 = client ?: return
+        val prompt = _state.value.launchOptions?.keyNamePrompt ?: return
+        updateLaunch { it.copy(keyBusy = true) }
+        viewModelScope.launch { importKey(ec2, prompt.key, name.trim(), prompt.label) }
+    }
+
+    fun cancelKeyImport() = updateLaunch { it.copy(keyNamePrompt = null) }
+
+    private suspend fun importKey(ec2: Ec2Client, key: SshPublicKey, name: String, label: String) {
+        try {
+            val pair = ec2.importKeyPair(name, key)
+            updateLaunch { o ->
+                o.copy(
+                    keyPairs = (o.keyPairs.filter { it.name != pair.name } + pair).sortedBy { it.name.lowercase() },
+                    keyPick = KeyPick(pair.name, "Your SSHBorg key \"$label\", just added to AWS"),
+                    keyNamePrompt = null,
+                    keyBusy = false,
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: AwsException) {
+            if (e.code == "InvalidKeyPair.Duplicate") {
+                // Taken since the list was loaded.
+                askForKeyName(key, label, name, _state.value.launchOptions?.keyPairs.orEmpty())
+            } else {
+                failKeyImport(e)
+            }
+        } catch (e: Exception) {
+            failKeyImport(e)
+        }
+    }
+
+    private fun askForKeyName(key: SshPublicKey, label: String, taken: String, pairs: List<Ec2KeyPair>) {
+        val names = pairs.map { it.name }.toSet() + taken
+        val suggested = generateSequence(2) { it + 1 }.map { "$taken-$it" }.first { it !in names }
+        updateLaunch {
+            it.copy(
+                keyBusy = false,
+                keyNamePrompt = KeyNamePrompt(key, label, suggested, "AWS already has a different key named \"$taken\"."),
+            )
+        }
+    }
+
+    private fun failKeyImport(e: Exception) {
+        val message = "Couldn't add the key to AWS: ${e.message}"
+        updateLaunch {
+            // Shown in the name prompt when it's open, so the user can try another name.
+            if (it.keyNamePrompt != null) it.copy(keyBusy = false, keyNamePrompt = it.keyNamePrompt.copy(error = message))
+            else it.copy(keyBusy = false, keyError = message)
+        }
+    }
+
+    private fun updateLaunch(change: (LaunchOptions) -> LaunchOptions) =
+        _state.update { s -> s.copy(launchOptions = s.launchOptions?.let(change)) }
+
     private suspend fun loadLaunchOptions(ec2: Ec2Client) {
         try {
             val loaded = coroutineScope {
@@ -311,6 +426,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun setBusy(id: String, busy: Boolean) =
         _state.update { it.copy(busyIds = if (busy) it.busyIds + id else it.busyIds - id) }
+
+    /** AWS takes up to 255 ASCII characters; anything else in the label becomes a dash. */
+    private fun keyPairName(label: String): String =
+        label.trim().replace(Regex("[^A-Za-z0-9._-]+"), "-").trim('-').take(255).ifEmpty { "sshborg" }
 
     private fun mask(keyId: String): String =
         if (keyId.length <= 8) "••••" else "${keyId.take(4)}••••${keyId.takeLast(4)}"

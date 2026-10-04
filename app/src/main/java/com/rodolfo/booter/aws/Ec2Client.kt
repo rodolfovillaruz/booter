@@ -6,6 +6,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.net.URL
 import java.net.URLEncoder
+import java.util.Base64
 import javax.net.ssl.HttpsURLConnection
 
 /** Talks to the EC2 Query API directly over HTTPS, signed with SigV4. */
@@ -61,10 +62,19 @@ class Ec2Client(
         listOfNotNull(amazonLinux.await(), ubuntu.await()) + own.await()
     }
 
-    suspend fun describeKeyPairs(): List<String> =
-        Ec2Xml.parseSetItems(call("DescribeKeyPairs", emptyMap()), "keySet")
-            .mapNotNull { it["keyName"] }
-            .sortedBy { it.lowercase() }
+    suspend fun describeKeyPairs(): List<Ec2KeyPair> =
+        Ec2Xml.parseSetItems(call("DescribeKeyPairs", mapOf("IncludePublicKey" to "true")), "keySet")
+            .mapNotNull { fields ->
+                fields["keyName"]?.let { Ec2KeyPair(it, fields["keyFingerprint"], fields["publicKey"]) }
+            }
+            .sortedBy { it.name.lowercase() }
+
+    /** Fails with InvalidKeyPair.Duplicate when [name] is taken. */
+    suspend fun importKeyPair(name: String, key: SshPublicKey): Ec2KeyPair {
+        val material = Base64.getEncoder().encodeToString(key.line.toByteArray())
+        val xml = call("ImportKeyPair", mapOf("KeyName" to name, "PublicKeyMaterial" to material))
+        return Ec2KeyPair(Ec2Xml.firstText(xml, "keyName") ?: name, Ec2Xml.firstText(xml, "keyFingerprint"), key.line)
+    }
 
     /**
      * Every subnet in the region: the default VPC's per-zone subnets first, then the rest by name.
