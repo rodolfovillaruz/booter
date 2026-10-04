@@ -18,11 +18,13 @@ A personal Android app for booting EC2 instances.
   the instance down. Once the instance reports `stopped`, Booter changes the type and starts it
   again. This only happens while the app is open and unlocked; a pending resize survives restarts.
 - **Launch** (the button at the bottom right): name a new instance and pick its image, size, key
-  pair, and security group. The images (the latest Amazon Linux 2023 and Ubuntu 24.04, plus your own
-  x86_64 AMIs), key pairs, and the default VPC's security groups are loaded live from the region.
-  Each group shows whether it allows SSH, and the first one that does is preselected. If none does,
-  `default` is preselected, but it only allows traffic from itself, so SSHBorg can't connect. Everything
-  else uses the defaults: the default VPC and subnet, and the image's default disk. Shutting it down
+  pair, subnet, and security group. The images (the latest Amazon Linux 2023 and Ubuntu 24.04, plus
+  your own x86_64 AMIs), key pairs, subnets, and security groups are loaded live from the region, so
+  it works without a default VPC. The default VPC's subnets come first when there is one. Only the
+  chosen subnet's VPC's groups are offered; each shows whether it allows SSH, and the first one that
+  does is preselected. If none does, `default` is preselected, but it only allows traffic from
+  itself, so SSHBorg can't connect. The instance always gets a public IP (it still needs a subnet
+  routed to an internet gateway to be reachable) and the image's default disk. Shutting it down
   from inside the OS stops it rather than terminating it.
 
 ## Build
@@ -47,7 +49,7 @@ fingerprint enrolled. minSdk is 28.
       "ec2:CreateTags",
       "ec2:DescribeImages",
       "ec2:DescribeKeyPairs",
-      "ec2:DescribeVpcs",
+      "ec2:DescribeSubnets",
       "ec2:DescribeSecurityGroups"
     ],
     "Resource": "*"

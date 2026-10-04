@@ -67,28 +67,30 @@ class Ec2Client(
             .sortedBy { it.lowercase() }
 
     /**
-     * Security groups in the default VPC, which is where [runInstance] launches. The group named
-     * "default" comes first. Empty when the region has no default VPC.
+     * Every subnet in the region: the default VPC's per-zone subnets first, then the rest by name.
+     * Empty when the region has no VPCs at all.
      */
-    suspend fun describeDefaultVpcSecurityGroups(): List<Ec2SecurityGroup> {
-        val vpcs = call("DescribeVpcs", mapOf("Filter.1.Name" to "isDefault", "Filter.1.Value.1" to "true"))
-        val vpcId = Ec2Xml.parseSetItems(vpcs, "vpcSet").firstNotNullOfOrNull { it["vpcId"] }
-            ?: return emptyList()
-        val xml = call("DescribeSecurityGroups", mapOf("Filter.1.Name" to "vpc-id", "Filter.1.Value.1" to vpcId))
-        return Ec2Xml.parseSecurityGroups(xml)
+    suspend fun describeSubnets(): List<Ec2Subnet> =
+        Ec2Xml.parseSubnets(call("DescribeSubnets", emptyMap()))
+            .sortedWith(compareBy({ !it.defaultForAz }, { it.label.lowercase() }))
+
+    /** Security groups in every VPC; "default" groups come first. */
+    suspend fun describeVpcSecurityGroups(): List<Ec2SecurityGroup> =
+        Ec2Xml.parseSecurityGroups(call("DescribeSecurityGroups", emptyMap()))
             .sortedWith(compareBy({ it.name != "default" }, { it.name.lowercase() }))
-    }
 
     /**
-     * Launches one instance into the default VPC and subnet, with the given security group (the
-     * VPC's default group when null). Reusing the same
-     * [clientToken] makes a repeated call return the first launch instead of starting another.
+     * Launches one instance into [subnetId] with the given security group (the VPC's default
+     * group when null) and a public IP, so it can be reached over SSH even in a subnet that
+     * doesn't hand them out by default. Reusing the same [clientToken] makes a repeated call
+     * return the first launch instead of starting another.
      */
     suspend fun runInstance(
         name: String,
         imageId: String,
         instanceType: String,
         keyName: String?,
+        subnetId: String,
         securityGroupId: String?,
         clientToken: String,
     ): Ec2Instance {
@@ -101,7 +103,11 @@ class Ec2Client(
             // Booter's resize flow relies on a shutdown stopping the instance, never terminating it.
             put("InstanceInitiatedShutdownBehavior", "stop")
             keyName?.let { put("KeyName", it) }
-            securityGroupId?.let { put("SecurityGroupId.1", it) }
+            // Subnet and group have to go on the interface once it's spelled out for the public IP.
+            put("NetworkInterface.1.DeviceIndex", "0")
+            put("NetworkInterface.1.SubnetId", subnetId)
+            put("NetworkInterface.1.AssociatePublicIpAddress", "true")
+            securityGroupId?.let { put("NetworkInterface.1.SecurityGroupId.1", it) }
             if (name.isNotBlank()) {
                 put("TagSpecification.1.ResourceType", "instance")
                 put("TagSpecification.1.Tag.1.Key", "Name")

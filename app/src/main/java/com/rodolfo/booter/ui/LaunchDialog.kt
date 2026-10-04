@@ -34,11 +34,18 @@ import androidx.compose.ui.unit.dp
 import com.rodolfo.booter.aws.Ec2Image
 import com.rodolfo.booter.aws.INSTANCE_SIZES
 
-/** Launches a new instance with the usual defaults; only image and key pair come from AWS. */
+/** Launches a new instance; image, key pair, subnet, and security group come from AWS. */
 @Composable
 fun LaunchDialog(
     options: LaunchOptions,
-    onLaunch: (name: String, image: Ec2Image, size: String, keyName: String?, securityGroupId: String?) -> Unit,
+    onLaunch: (
+        name: String,
+        image: Ec2Image,
+        size: String,
+        keyName: String?,
+        subnetId: String,
+        securityGroupId: String?,
+    ) -> Unit,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -47,15 +54,19 @@ fun LaunchDialog(
     var imageId by rememberSaveable { mutableStateOf<String?>(null) }
     // "" means the user chose no key pair; null means they haven't picked yet.
     var keyChoice by rememberSaveable { mutableStateOf<String?>(null) }
+    var subnetId by rememberSaveable { mutableStateOf<String?>(null) }
     var groupId by rememberSaveable { mutableStateOf<String?>(null) }
 
     val image = options.images.find { it.id == imageId } ?: options.images.firstOrNull()
     val keyName = (keyChoice ?: options.keyPairs.firstOrNull())?.takeIf { it.isNotEmpty() }
-    // Null only when the region has no default VPC; AWS then picks (and likely rejects) the launch.
-    // Until the user picks, prefer a group SSHBorg can get through.
-    val group = options.securityGroups.find { it.id == groupId }
-        ?: options.securityGroups.firstOrNull { it.allowsSsh }
-        ?: options.securityGroups.firstOrNull()
+    // Null only when the region has no VPCs at all, and then there's nothing to launch into.
+    val subnet = options.subnets.find { it.id == subnetId } ?: options.subnets.firstOrNull()
+    // Groups belong to a VPC, so only the subnet's VPC's groups can be used. Until the user picks,
+    // prefer one SSHBorg can get through.
+    val groups = options.securityGroups.filter { it.vpcId == subnet?.vpcId }
+    val group = groups.find { it.id == groupId }
+        ?: groups.firstOrNull { it.allowsSsh }
+        ?: groups.firstOrNull()
     val ready = !options.loading && options.error == null
 
     AlertDialog(
@@ -65,7 +76,7 @@ fun LaunchDialog(
             when {
                 options.loading -> Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
-                    Text("Loading images, key pairs, and security groups…", modifier = Modifier.padding(start = 16.dp))
+                    Text("Loading images, key pairs, and networks…", modifier = Modifier.padding(start = 16.dp))
                 }
 
                 options.error != null -> Text("Couldn't load launch options: ${options.error}")
@@ -116,11 +127,26 @@ fun LaunchDialog(
                         onPick = { keyChoice = it },
                     )
 
+                    if (subnet == null) {
+                        Text(
+                            "No subnets in this region. Create a VPC (or a default VPC) in the AWS console first.",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    } else {
+                        Picker(
+                            label = "Subnet",
+                            selected = subnet.label,
+                            choices = options.subnets.map { it.id to it.label },
+                            supporting = "${subnet.id} · ${subnet.vpcId}",
+                            onPick = { subnetId = it },
+                        )
+                    }
+
                     if (group != null) {
                         Picker(
                             label = "Security group",
                             selected = group.name,
-                            choices = options.securityGroups.map {
+                            choices = groups.map {
                                 it.id to "${it.name} · ${if (it.allowsSsh) "SSH open" else "no SSH"}"
                             },
                             supporting = if (group.allowsSsh) {
@@ -133,7 +159,7 @@ fun LaunchDialog(
                     }
 
                     Text(
-                        "Uses the default VPC and subnet, and the image's default disk.",
+                        "Gets a public IP and the image's default disk.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -145,8 +171,10 @@ fun LaunchDialog(
                 options.error != null -> TextButton(onClick = onRetry) { Text("Retry") }
                 options.launching -> CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
                 else -> TextButton(
-                    onClick = { image?.let { onLaunch(name, it, size, keyName, group?.id) } },
-                    enabled = ready && image != null,
+                    onClick = {
+                        if (image != null && subnet != null) onLaunch(name, image, size, keyName, subnet.id, group?.id)
+                    },
+                    enabled = ready && image != null && subnet != null,
                 ) { Text("Launch") }
             }
         },
