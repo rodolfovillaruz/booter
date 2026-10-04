@@ -143,6 +143,7 @@ internal object Ec2Xml {
 
         var id: String? = null
         var name: String? = null
+        var vpcId: String? = null
         var allowsSsh = false
         var protocol: String? = null
         var fromPort: Int? = null
@@ -163,6 +164,7 @@ internal object Ec2Xml {
                     when {
                         field == listOf("groupId") -> id = text
                         field == listOf("groupName") -> name = text
+                        field == listOf("vpcId") -> vpcId = text
                         !inRule() -> {}
                         path.size == 6 && path[5] == "ipProtocol" -> protocol = text
                         path.size == 6 && path[5] == "fromPort" -> fromPort = text.toIntOrNull()
@@ -181,15 +183,74 @@ internal object Ec2Xml {
                         toPort = null
                         hasRange = false
                     } else if (inGroup() && path.size == 3) {
-                        id?.let { groups += Ec2SecurityGroup(it, name ?: it, allowsSsh) }
+                        val groupId = id
+                        val groupVpc = vpcId
+                        // EC2-Classic groups have no VPC and can't be used with a subnet.
+                        if (groupId != null && groupVpc != null) {
+                            groups += Ec2SecurityGroup(groupId, name ?: groupId, groupVpc, allowsSsh)
+                        }
                         id = null
                         name = null
+                        vpcId = null
                         allowsSsh = false
                     }
                     path.removeAt(path.lastIndex)
                 }
 
                 XmlPullParser.END_DOCUMENT -> return groups
+            }
+        }
+    }
+
+    /** Walks DescribeSubnetsResponse, picking up each subnet's Name tag from its `tagSet`. */
+    fun parseSubnets(xml: String): List<Ec2Subnet> {
+        val parser = newParser(xml)
+        val path = ArrayList<String>()
+        val subnets = mutableListOf<Ec2Subnet>()
+        var fields = mutableMapOf<String, String>()
+        var tagKey: String? = null
+        var tagValue: String? = null
+
+        fun inSubnet() = path.size >= 3 && path[1] == "subnetSet" && path[2] == "item"
+
+        while (true) {
+            when (parser.next()) {
+                XmlPullParser.START_TAG -> path += parser.name
+
+                XmlPullParser.TEXT -> {
+                    val text = parser.text.trim()
+                    if (text.isEmpty() || !inSubnet()) continue
+                    when {
+                        path.size == 4 -> fields[path[3]] = text
+                        path.size == 6 && path[3] == "tagSet" && path[5] == "key" -> tagKey = text
+                        path.size == 6 && path[3] == "tagSet" && path[5] == "value" -> tagValue = text
+                    }
+                }
+
+                XmlPullParser.END_TAG -> {
+                    if (inSubnet() && path.size == 5 && path[3] == "tagSet") {
+                        val value = tagValue
+                        if (tagKey == "Name" && value != null) fields["Name"] = value
+                        tagKey = null
+                        tagValue = null
+                    } else if (inSubnet() && path.size == 3) {
+                        val id = fields["subnetId"]
+                        val vpcId = fields["vpcId"]
+                        if (id != null && vpcId != null) {
+                            subnets += Ec2Subnet(
+                                id = id,
+                                vpcId = vpcId,
+                                name = fields["Name"],
+                                availabilityZone = fields["availabilityZone"].orEmpty(),
+                                defaultForAz = fields["defaultForAz"] == "true",
+                            )
+                        }
+                        fields = mutableMapOf()
+                    }
+                    path.removeAt(path.lastIndex)
+                }
+
+                XmlPullParser.END_DOCUMENT -> return subnets
             }
         }
     }

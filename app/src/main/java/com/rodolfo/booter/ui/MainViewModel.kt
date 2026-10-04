@@ -8,6 +8,7 @@ import com.rodolfo.booter.aws.Ec2Client
 import com.rodolfo.booter.aws.Ec2Image
 import com.rodolfo.booter.aws.Ec2Instance
 import com.rodolfo.booter.aws.Ec2SecurityGroup
+import com.rodolfo.booter.aws.Ec2Subnet
 import com.rodolfo.booter.data.PendingResizeStore
 import com.rodolfo.booter.security.CredentialVault
 import kotlinx.coroutines.CancellationException
@@ -34,6 +35,7 @@ data class LaunchOptions(
     val loading: Boolean = true,
     val images: List<Ec2Image> = emptyList(),
     val keyPairs: List<String> = emptyList(),
+    val subnets: List<Ec2Subnet> = emptyList(),
     val securityGroups: List<Ec2SecurityGroup> = emptyList(),
     val error: String? = null,
     val launching: Boolean = false,
@@ -201,14 +203,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun dismissLaunch() = _state.update { it.copy(launchOptions = null) }
 
-    fun launch(name: String, image: Ec2Image, size: String, keyName: String?, securityGroupId: String?) {
+    fun launch(
+        name: String,
+        image: Ec2Image,
+        size: String,
+        keyName: String?,
+        subnetId: String,
+        securityGroupId: String?,
+    ) {
         val ec2 = client ?: return
         val options = _state.value.launchOptions ?: return
         if (options.launching) return
         _state.update { it.copy(launchOptions = options.copy(launching = true)) }
         viewModelScope.launch {
             try {
-                val instance = ec2.runInstance(name.trim(), image.id, size, keyName, securityGroupId, options.clientToken)
+                val instance = ec2.runInstance(
+                    name.trim(), image.id, size, keyName, subnetId, securityGroupId, options.clientToken,
+                )
                 _state.update { s ->
                     val others = s.instances.filter { it.id != instance.id }
                     s.copy(
@@ -231,11 +242,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val loaded = coroutineScope {
                 val images = async { ec2.describeLaunchImages() }
                 val keyPairs = async { ec2.describeKeyPairs() }
-                val securityGroups = async { ec2.describeDefaultVpcSecurityGroups() }
+                val subnets = async { ec2.describeSubnets() }
+                val securityGroups = async { ec2.describeVpcSecurityGroups() }
                 LaunchOptions(
                     loading = false,
                     images = images.await(),
                     keyPairs = keyPairs.await(),
+                    subnets = subnets.await(),
                     securityGroups = securityGroups.await(),
                 )
             }

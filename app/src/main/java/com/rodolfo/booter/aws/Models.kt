@@ -24,9 +24,22 @@ data class Ec2Image(
 data class Ec2SecurityGroup(
     val id: String,
     val name: String,
+    val vpcId: String,
     /** Whether an inbound rule lets some IP range reach TCP port 22. */
     val allowsSsh: Boolean,
 )
+
+data class Ec2Subnet(
+    val id: String,
+    val vpcId: String,
+    /** The Name tag, if any. */
+    val name: String?,
+    val availabilityZone: String,
+    /** Whether it's the default subnet for its zone, which only the default VPC has. */
+    val defaultForAz: Boolean,
+) {
+    val label: String get() = listOfNotNull(name, availabilityZone).joinToString(" · ")
+}
 
 class AwsException(val code: String, message: String) : Exception("$message ($code)")
 
