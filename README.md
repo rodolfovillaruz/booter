@@ -62,3 +62,18 @@ fingerprint enrolled. minSdk is 28.
   }]
 }
 ```
+
+## License
+
+Booter is free software, released under the [GNU General Public License v3.0](LICENSE).
+
+It includes code from [SSHBorg](https://github.com/payne1982/sshborg), Copyright payne1982,
+licensed under GPL-3.0. Files taken from SSHBorg say so at the top, along with the date they were
+modified.
+
+Bundled fonts keep their own licenses:
+
+- JetBrains Mono Nerd Font (`app/src/main/assets/fonts/JetBrainsMonoNerdFontMono-*.ttf`): SIL Open
+  Font License 1.1, see [`OFL.txt`](app/src/main/assets/fonts/OFL.txt).
+- Roboto Condensed (`app/src/main/res/font/roboto_condensed_*.ttf`), Copyright 2011 Google Inc.:
+  Apache License 2.0, see [`LICENSE-RobotoCondensed.txt`](app/src/main/assets/fonts/LICENSE-RobotoCondensed.txt).
