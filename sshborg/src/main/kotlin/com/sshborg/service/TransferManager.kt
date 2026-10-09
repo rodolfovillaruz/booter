@@ -1,0 +1,262 @@
+// From SSHBorg (https://github.com/payne1982/sshborg), app/src/main/kotlin/com/sshborg/service/TransferManager.kt
+// Copyright payne1982. Licensed under the GNU GPL v3.0, see LICENSE. Copied unchanged on 2026-10-09.
+
+package com.sshborg.service
+
+import android.app.Application
+import android.content.ContentValues
+import android.os.Environment
+import android.provider.MediaStore
+import android.webkit.MimeTypeMap
+import com.sshborg.BuildConfig
+import com.sshborg.R
+import com.sshborg.data.ssh.SftpSession
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+data class TransferTask(
+    val remotePath: String,
+    val filename: String,
+    val localDir: String,
+)
+
+/**
+ * One file an operation could not handle: its name, the one-line reason and the full stack trace,
+ * kept so the user can copy exactly what went wrong instead of a snackbar that is gone in seconds.
+ */
+data class FileFailure(
+    val name: String,
+    val message: String,
+    val detail: String,
+) {
+    companion object {
+        fun of(name: String, e: Throwable) = FileFailure(
+            name    = name,
+            message = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName,
+            detail  = e.stackTraceToString(),
+        )
+    }
+}
+
+data class BackgroundTransfer(
+    val id: String,
+    val sessionId: String,
+    val filename: String,
+    val localDir: String = "",
+    val fileIndex: Int = 1,
+    val totalFiles: Int = 1,
+    val bytesReceived: Long = 0L,
+    val skippedFiles: Int = 0,
+    /** Files saved successfully so far. */
+    val doneFiles: Int = 0,
+    /** Why each skipped file was skipped, plus the error that ended the transfer, if any. */
+    val failures: List<FileFailure> = emptyList(),
+    /** Files never tried because the connection was gone before their turn. */
+    val notAttempted: List<String> = emptyList(),
+    val status: Status = Status.Running,
+    /** Epoch millis when the transfer was enqueued. */
+    val startedAt: Long = System.currentTimeMillis(),
+    /** Epoch millis when the transfer reached a terminal state; null while running. */
+    val completedAt: Long? = null,
+) {
+    enum class Status { Running, Done, Error, Cancelled }
+}
+
+class TransferManager(private val app: Application) {
+
+    val downloadFolder =
+        "${Environment.DIRECTORY_DOWNLOADS}/SSHBorg${if (BuildConfig.DEBUG) "-debug" else ""}/"
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val _transfers = MutableStateFlow<List<BackgroundTransfer>>(emptyList())
+    val transfers: StateFlow<List<BackgroundTransfer>> = _transfers.asStateFlow()
+
+    private val jobMap     = ConcurrentHashMap<String, Job>()
+    private val channelMap = ConcurrentHashMap<String, com.jcraft.jsch.ChannelSftp>()
+
+    /**
+     * Enqueues one or more files for download. Returns a transfer ID that can be used to
+     * observe progress (via [transfers]) or cancel the transfer.
+     * All tasks share one secondary SFTP channel and are downloaded sequentially.
+     */
+    fun enqueue(
+        sessionId: String,
+        sftpSession: SftpSession,
+        tasks: List<TransferTask>,
+        /** Failures found while preparing the batch (e.g. a folder that could not be listed). */
+        preparationFailures: List<FileFailure> = emptyList(),
+    ): String {
+        require(tasks.isNotEmpty())
+        val id = UUID.randomUUID().toString()
+        _transfers.update { it + BackgroundTransfer(id, sessionId, tasks.first().filename, tasks.first().localDir, 1, tasks.size) }
+
+        val job = scope.launch {
+            val thisJob = coroutineContext[Job]!!
+            var channel: com.jcraft.jsch.ChannelSftp? = null
+            var skipped = 0
+            val failures = preparationFailures.toMutableList()
+            var current = ""   // the file being handled; empty while opening the channel
+            var done = 0
+            var lastUri: android.net.Uri? = null   // set on a successful single-file save, for the tap-to-open intent
+            var lastMime: String? = null
+            fun fail(notAttempted: List<String>) {
+                update(id) {
+                    it.copy(
+                        status       = BackgroundTransfer.Status.Error,
+                        doneFiles    = done,
+                        failures     = failures.toList(),
+                        notAttempted = notAttempted,
+                        completedAt  = System.currentTimeMillis(),
+                    )
+                }
+                val what = if (tasks.size == 1) tasks.first().filename
+                           else app.getString(R.string.sftp_report_downloaded_n_of_m, done, tasks.size)
+                SshForegroundService.notifyDownloadError(app, "$what\n" + app.getString(R.string.sftp_notify_see_details))
+            }
+
+            try {
+                channel = sftpSession.openBackgroundChannel()
+                channelMap[id] = channel
+
+                for ((index, task) in tasks.withIndex()) {
+                    if (!thisJob.isActive) break
+                    current = task.filename
+                    // A dead connection fails every remaining file the same way: stop, and list
+                    // the rest as not attempted rather than as a column of identical errors.
+                    if (!channel.isConnected) {
+                        throw ConnectionGone(tasks.drop(index).map { it.filename })
+                    }
+                    update(id) { it.copy(filename = task.filename, localDir = task.localDir, fileIndex = index + 1, bytesReceived = 0L) }
+
+                    val ext  = task.filename.substringAfterLast('.', "").lowercase()
+                    val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, task.filename)
+                        put(MediaStore.Downloads.MIME_TYPE, mime)
+                        put(MediaStore.Downloads.RELATIVE_PATH, task.localDir)
+                    }
+                    val uri = app.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    if (uri == null) {
+                        skipped++
+                        failures += FileFailure(task.filename, app.getString(R.string.sftp_report_local_file_failed), "")
+                        update(id) { it.copy(failures = failures.toList()) }
+                        continue
+                    }
+
+                    try {
+                        app.contentResolver.openOutputStream(uri)!!.use { out ->
+                            var received = 0L
+                            channel.get(task.remotePath, out, object : com.jcraft.jsch.SftpProgressMonitor {
+                                override fun init(op: Int, src: String?, dest: String?, max: Long) {}
+                                override fun count(count: Long): Boolean {
+                                    if (!thisJob.isActive) return false
+                                    received += count
+                                    update(id) { it.copy(bytesReceived = received) }
+                                    return true
+                                }
+                                override fun end() {}
+                            })
+                        }
+                        lastUri = uri; lastMime = mime
+                        done++
+                    } catch (e: Exception) {
+                        app.contentResolver.delete(uri, null, null)
+                        if (!thisJob.isActive || e is CancellationException) break
+                        skipped++   // per-file error: record it, skip and continue
+                        failures += FileFailure.of(task.filename, e)
+                        update(id) { it.copy(failures = failures.toList()) }
+                    }
+                }
+
+                if (thisJob.isActive && done == 0 && failures.isNotEmpty()) {
+                    // Nothing arrived: that is a failed transfer, not a finished one with skips.
+                    jobMap.remove(id)
+                    fail(emptyList())
+                } else if (thisJob.isActive) {
+                    jobMap.remove(id)
+                    update(id) { it.copy(status = BackgroundTransfer.Status.Done, skippedFiles = skipped, doneFiles = done, failures = failures.toList(), completedAt = System.currentTimeMillis()) }
+                    val last = tasks.last()
+                    val single = tasks.size == 1
+                    val msg = when {
+                        single      -> app.getString(R.string.sftp_saved_to_downloads, "${last.localDir}${last.filename}")
+                        skipped > 0 -> app.getString(R.string.sftp_downloaded_n_files_skipped, tasks.size - skipped, skipped)
+                        else        -> app.getString(R.string.sftp_downloaded_n_files, tasks.size)
+                    }
+                    // Single file already carries its full path; for a multi-file batch, append the
+                    // (dynamic) destination folder on a second line so the notification shows where it went.
+                    val body = (if (single) msg else "$msg\n$downloadFolder") +
+                        (if (failures.isNotEmpty()) "\n" + app.getString(R.string.sftp_notify_see_details) else "")
+                    SshForegroundService.notifyDownloadComplete(
+                        app, body,
+                        openUri = if (single) lastUri else null,   // tap: single -> open the file, multi -> open Downloads
+                        mime = if (single) lastMime else null,
+                    )
+                } else if (jobMap.remove(id) != null) {
+                    update(id) { it.copy(status = BackgroundTransfer.Status.Cancelled, completedAt = System.currentTimeMillis()) }
+                }
+            } catch (e: Exception) {
+                if (jobMap.remove(id) != null) {
+                    val cancelled = e is CancellationException || !thisJob.isActive
+                    if (cancelled) {
+                        update(id) { it.copy(status = BackgroundTransfer.Status.Cancelled, completedAt = System.currentTimeMillis()) }
+                    } else {
+                        // The connection died, or the channel never opened: keep the error that
+                        // ended the transfer, and which files it left behind.
+                        val gone = e as? ConnectionGone
+                        if (gone == null) failures += FileFailure.of(current, e)
+                        else if (failures.isEmpty()) failures += FileFailure.of("", e)
+                        fail(gone?.remaining ?: emptyList())
+                    }
+                }
+            } finally {
+                runCatching { channel?.disconnect() }
+                channelMap.remove(id)
+                jobMap.remove(id)
+            }
+        }
+        jobMap[id] = job
+        return id
+    }
+
+    /** Convenience overload for a single file. */
+    fun enqueue(
+        sessionId: String,
+        sftpSession: SftpSession,
+        remotePath: String,
+        filename: String,
+        localDir: String = downloadFolder,
+    ): String = enqueue(sessionId, sftpSession, listOf(TransferTask(remotePath, filename, localDir)))
+
+    fun cancel(id: String) {
+        jobMap.remove(id)?.cancel()
+        // Disconnect on the IO scope: channel.disconnect() writes an SSH packet, and a
+        // network write on the main thread throws after JSch has already advanced its
+        // cipher state, corrupting the whole SSH connection.
+        channelMap.remove(id)?.let { ch -> scope.launch { runCatching { ch.disconnect() } } }
+        _transfers.update { list ->
+            list.map { if (it.id == id && it.status == BackgroundTransfer.Status.Running) it.copy(status = BackgroundTransfer.Status.Cancelled, completedAt = System.currentTimeMillis()) else it }
+        }
+    }
+
+    fun cancelBySession(sessionId: String) {
+        _transfers.value
+            .filter { it.status == BackgroundTransfer.Status.Running && it.sessionId == sessionId }
+            .forEach { cancel(it.id) }
+    }
+
+    fun dismiss(id: String) {
+        if (jobMap.containsKey(id)) return
+        _transfers.update { list -> list.filter { it.id != id } }
+    }
+
+    /** Thrown inside a transfer when its channel is found closed before the next file. */
+    private class ConnectionGone(val remaining: List<String>) :
+        java.io.IOException("The connection was closed before the transfer finished")
+
+    private fun update(id: String, block: (BackgroundTransfer) -> BackgroundTransfer) {
+        _transfers.update { list -> list.map { if (it.id == id) block(it) else it } }
+    }
+}

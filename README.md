@@ -73,7 +73,7 @@ modified.
 
 Bundled fonts keep their own licenses:
 
-- JetBrains Mono Nerd Font (`app/src/main/assets/fonts/JetBrainsMonoNerdFontMono-*.ttf`): SIL Open
-  Font License 1.1, see [`OFL.txt`](app/src/main/assets/fonts/OFL.txt).
-- Roboto Condensed (`app/src/main/res/font/roboto_condensed_*.ttf`), Copyright 2011 Google Inc.:
-  Apache License 2.0, see [`LICENSE-RobotoCondensed.txt`](app/src/main/assets/fonts/LICENSE-RobotoCondensed.txt).
+- JetBrains Mono Nerd Font (`sshborg/src/main/assets/fonts/JetBrainsMonoNerdFontMono-*.ttf`): SIL Open
+  Font License 1.1, see [`OFL.txt`](sshborg/src/main/assets/fonts/OFL.txt).
+- Roboto Condensed (`sshborg/src/main/res/font/roboto_condensed_*.ttf`), Copyright 2011 Google Inc.:
+  Apache License 2.0, see [`LICENSE-RobotoCondensed.txt`](sshborg/src/main/assets/fonts/LICENSE-RobotoCondensed.txt).

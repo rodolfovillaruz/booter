@@ -1,0 +1,685 @@
+// From SSHBorg (https://github.com/payne1982/sshborg), app/src/main/kotlin/com/sshborg/ui/terminal/TerminalViewModel.kt
+// Copyright payne1982. Licensed under the GNU GPL v3.0, see LICENSE. Copied unchanged on 2026-10-09.
+
+package com.sshborg.ui.terminal
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import com.sshborg.R
+import androidx.lifecycle.viewModelScope
+import com.sshborg.SshBorgApp
+import com.sshborg.data.db.HostEntity
+import com.sshborg.data.ExtraBar
+import com.sshborg.data.ExtraBarPresets
+import com.sshborg.data.KeystoreManager
+import com.sshborg.data.ssh.*
+import com.sshborg.service.SessionManager
+import com.sshborg.service.SshForegroundService
+import com.sshborg.terminal.TerminalEmulator
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import java.io.ByteArrayOutputStream
+
+sealed interface ConnectionState {
+    object Connecting : ConnectionState
+    object Connected : ConnectionState
+    data class HostKeyPrompt(val hostname: String, val fingerprint: String) : ConnectionState
+    data class PasswordPrompt(val hostname: String, val wrongPassword: Boolean = false) : ConnectionState
+    data class Error(val message: String, val detail: String? = null) : ConnectionState
+    /**
+     * @param summary short, human-readable line shown under the title (all non-clean cases).
+     * @param detail  full technical cause (exception text + recent JSch log tail), shown
+     *                in the expandable, scrollable, copyable section. Null → no details section.
+     */
+    data class Disconnected(val summary: String? = null, val detail: String? = null) : ConnectionState
+}
+
+class TerminalViewModel(app: Application) : AndroidViewModel(app) {
+
+    private val sshBorgApp    = app as SshBorgApp
+    private val sessionManager = sshBorgApp.sessionManager
+    private val hostDao        = sshBorgApp.db.hostDao()
+    private val keyDao         = sshBorgApp.db.sshKeyDao()
+    private val prefs          = sshBorgApp.appPreferences
+
+    private var scrollbackLines = 2000
+    init {
+        viewModelScope.launch {
+            scrollbackLines = prefs.scrollbackLines.first()
+        }
+    }
+
+    private var sessionId: String? = null
+
+    /** Emulator for the current session — initialized in attach(). */
+    private val _emulator = MutableStateFlow(TerminalEmulator(80, 24))
+    val emulatorFlow: StateFlow<TerminalEmulator> = _emulator.asStateFlow()
+
+    private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Connecting)
+    val state: StateFlow<ConnectionState> = _state
+
+    private val _title = MutableStateFlow("")
+    val title: StateFlow<String> = _title
+
+    var onNeedsRedraw: (() -> Unit)? = null
+
+    private var shellSession: ShellSession? = null
+    private var readerJob: Job? = null
+    private var connectJob: Job? = null
+
+    private val hostKeyResult  = MutableSharedFlow<Boolean>(extraBufferCapacity = 1)
+    private val passwordResult = MutableSharedFlow<String>(extraBufferCapacity = 1)
+
+    // ── Command history suggestions ───────────────────────────────────────────
+
+    /** Commands loaded from the server's shell history file, most-recent first. */
+    private val _commandHistory = MutableStateFlow<List<String>>(emptyList())
+
+    /** Filtered suggestions for the current partial input. */
+    private val _suggestions = MutableStateFlow<List<String>>(emptyList())
+    val suggestions: StateFlow<List<String>> = _suggestions
+
+    val suggestionsBarSticky: StateFlow<Boolean> =
+        prefs.suggestionsBarSticky.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
+     * Effective "pinned" state of the extra-keys bar: the cluster-scoped override from
+     * [SessionManager] if the user has toggled the on-bar pin, otherwise the settings
+     * default. When true the bar stays visible with the keyboard closed.
+     */
+    val extraBarPinned: StateFlow<Boolean> =
+        combine(sessionManager.extraBarPinned, prefs.extraKeysBarPinned) { override, default ->
+            override ?: default
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** Flips the pin, storing a concrete override for the current terminal cluster. */
+    fun toggleExtraBarPinned() {
+        sessionManager.setExtraBarPinned(!extraBarPinned.value)
+    }
+
+    /** Layout of the extra-key bar (issue #12) and the list offered by its switch menu. */
+    val extraBar: StateFlow<ExtraBar> =
+        prefs.extraBar.stateIn(viewModelScope, SharingStarted.Eagerly, ExtraBarPresets.all.first())
+    val allExtraBars: StateFlow<List<ExtraBar>> =
+        prefs.allExtraBars.stateIn(viewModelScope, SharingStarted.Eagerly, ExtraBarPresets.all)
+
+    fun selectExtraBar(id: String) {
+        viewModelScope.launch { prefs.setExtraBarSelectedId(id) }
+    }
+
+    /** Prompt string detected from first terminal render, used to strip it from the input line. */
+    private var promptPrefix = ""
+    private var promptDetected = false
+    private var promptDetectJob: Job? = null
+    private var suggestionsUpdateJob: Job? = null
+
+    /** Emitted when the remote shell exits cleanly — screen should navigate back automatically. */
+    private val _navBack = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val navBack: SharedFlow<Unit> = _navBack
+
+    /**
+     * Attaches this ViewModel to an existing session in [SessionManager].
+     * Must be called before [connect]. If the session is already connected, starts reading.
+     */
+    fun attach(id: String) {
+        sessionId = id
+        val session = sessionManager.get(id) ?: run {
+            _state.value = ConnectionState.Error(getApplication<Application>().getString(R.string.error_session_not_found))
+            return
+        }
+
+        // Get or create the emulator for this session
+        val em = session.emulator ?: TerminalEmulator(80, 24, scrollbackLines).also { newEm ->
+            sessionManager.update(id) { it.copy(emulator = newEm) }
+        }
+        em.onTitleChanged = { t -> _title.value = t }
+        _emulator.value = em
+
+        // Restore suggestion state cached on the session. When switching tabs the
+        // ViewModel is recreated, and attach() (not connect()) runs, so without this
+        // the loaded command history and detected prompt would be lost and the
+        // suggestion bar would stay empty until a full reconnect.
+        _commandHistory.value = session.commandHistory
+        if (session.promptPrefix.isNotEmpty()) {
+            promptPrefix = session.promptPrefix
+            promptDetected = true
+        }
+
+        // If already connected, resume reading
+        if (session.shellSession != null) {
+            shellSession = session.shellSession
+            if (session.shellSession.isConnected) {
+                _state.value = ConnectionState.Connected
+                startReading(session.shellSession)
+            } else {
+                // Session dropped while backgrounded: no exception to catch here, so show JSch's
+                // own last disconnect reason as the summary (falls back to a generic line).
+                _state.value = ConnectionState.Disconnected(
+                    summary = com.sshborg.data.ssh.SshDiagnostics.lastDisconnectReason()
+                        ?: getApplication<Application>().getString(R.string.terminal_connection_lost),
+                    detail = com.sshborg.data.ssh.SshDiagnostics.lastDisconnectDetail(),
+                )
+                sessionManager.update(id) { it.copy(status = SessionManager.Status.Disconnected) }
+            }
+        }
+        // else: fresh session — maybeConnect() will start it once a real size is known.
+        attached = true
+        maybeConnect()
+    }
+
+    /** Set once [attach] has run, so a size callback that races ahead of it doesn't try to connect early. */
+    private var attached = false
+    /** Last real geometry reported by the view (0 until the first measurement). */
+    private var lastCols = 0
+    private var lastRows = 0
+
+    /**
+     * Called by the view every time it measures its size. For a fresh session this drives the
+     * initial connection: we connect only once we have BOTH an attached session and a real
+     * measurement, at that measurement, so the login banner is generated and rendered at the
+     * correct width from the start instead of being printed at a default 80 cols and then
+     * truncated by the later shrink. Later measurements are plain resizes.
+     */
+    fun onTerminalSize(cols: Int, rows: Int) {
+        lastCols = cols; lastRows = rows
+        if (shellSession != null) resize(cols, rows) else maybeConnect()
+    }
+
+    /** Connects a fresh session as soon as it is both attached and has a real measured size. */
+    private fun maybeConnect() {
+        if (shellSession != null || connectJob != null || !attached) return
+        if (lastCols > 0 && lastRows > 0) connect(lastCols, lastRows)
+        // else: no measurement yet — wait for the first onTerminalSize (connectWithDefaultsIfPending covers the never-measured case)
+    }
+
+    /** Fallback: if a fresh session is still unconnected (e.g. no measurement arrived), connect it. */
+    fun connectWithDefaultsIfPending() {
+        if (shellSession != null || connectJob != null || !attached) return
+        if (lastCols > 0 && lastRows > 0) connect(lastCols, lastRows) else connect()
+    }
+
+    /** Starts the SSH connection for a newly created session. */
+    fun connect(columns: Int = 80, rows: Int = 24) {
+        val id     = sessionId ?: return
+        val hostId = sessionManager.get(id)?.hostId ?: return
+        if (connectJob?.isActive == true) return
+
+        // Size the emulator to the real terminal geometry before any bytes arrive, so the
+        // login banner is laid out at the right width from the start. This avoids the
+        // shrink-and-truncate that happened when we opened at a default 80x24 and only
+        // resized after the banner had already been printed.
+        synchronized(_emulator.value) { _emulator.value.resize(columns, rows) }
+
+        connectJob = viewModelScope.launch(Dispatchers.IO) {
+            val host = hostDao.getById(hostId) ?: run {
+                _state.value = ConnectionState.Error(getApplication<Application>().getString(R.string.error_host_not_found)); return@launch
+            }
+            var auth = buildAuth(host) ?: return@launch
+            var wrongPassword = false
+
+            // Pre-load jump host entities for host-list mode so we can look them up in onHostKeyVerify
+            val jumpHostEntities = if (host.jumpMode == "host_list") {
+                buildJumpHostEntities(host.jumpHostIdList)
+            } else emptyList()
+
+            while (true) {
+                _state.value = ConnectionState.Connecting
+
+                val jumpHosts = if (host.jumpMode == "host_list") {
+                    jumpHostEntities.mapNotNull { jumpHost ->
+                        val jumpAuth = buildJumpAuth(jumpHost) ?: return@mapNotNull null
+                        JumpHost(
+                            host             = jumpHost.hostname,
+                            port             = jumpHost.port,
+                            username         = jumpHost.username,
+                            knownHostsEntry  = jumpHost.knownHostsEntry,
+                            auth             = jumpAuth,
+                            hostId           = jumpHost.id,
+                        )
+                    }
+                } else {
+                    parseJumpHosts(host.jumpHosts, host.jumpHostKeys)
+                }
+
+                val result = runCatching {
+                    SshManager.openShell(
+                        params = SshConnectionParams(
+                            hostname           = host.hostname,
+                            port               = host.port,
+                            username           = host.username,
+                            auth               = auth,
+                            agentForwarding    = host.agentForwarding,
+                            knownHostsEntry    = host.knownHostsEntry,
+                            jumpHosts          = jumpHosts,
+                            portForwardings    = parsePortForwardings(host.portForwardings),
+                            allowLegacyCiphers = host.allowLegacyCiphers,
+                        ),
+                        columns = columns,
+                        rows    = rows,
+                        command = if (host.tmuxEnabled) tmuxCommand(host) else null,
+                        onHostKeyVerify = { hostname, fingerprint, keyLine ->
+                            runBlocking {
+                                _state.value = ConnectionState.HostKeyPrompt(hostname, fingerprint)
+                                val accepted = hostKeyResult.first()
+                                if (accepted) {
+                                    _state.value = ConnectionState.Connecting
+                                    val current = hostDao.getById(hostId)
+                                    if (current != null) {
+                                        if (hostname == host.hostname) {
+                                            if (current.knownHostsEntry == null)
+                                                hostDao.upsert(current.copy(knownHostsEntry = keyLine))
+                                        } else if (host.jumpMode == "host_list") {
+                                            // Host-list: persist key to the jump host's own entity
+                                            val jumpEntity = jumpHostEntities.find { it.hostname == hostname }
+                                            if (jumpEntity != null) {
+                                                val jCurrent = hostDao.getById(jumpEntity.id)
+                                                if (jCurrent != null && jCurrent.knownHostsEntry == null)
+                                                    hostDao.upsert(jCurrent.copy(knownHostsEntry = keyLine))
+                                            }
+                                        } else {
+                                            // Simple mode: persist to target's jumpHostKeys blob
+                                            val existing = current.jumpHostKeys
+                                                ?.lines()?.filter { it.isNotBlank() } ?: emptyList()
+                                            if (keyLine !in existing)
+                                                hostDao.upsert(current.copy(jumpHostKeys = (existing + keyLine).joinToString("\n")))
+                                        }
+                                    }
+                                }
+                                accepted
+                            }
+                        },
+                    )
+                }
+
+                val session = result.getOrNull()
+                if (session != null) {
+                    shellSession = session
+                    val em = _emulator.value
+                    synchronized(em) { session.resize(em.buffer.columns, em.buffer.rows) }
+                    withContext(Dispatchers.Main.immediate) {
+                        sessionManager.update(id) { it.copy(shellSession = session, status = SessionManager.Status.Connected) }
+                        _state.value = ConnectionState.Connected
+                    }
+                    val saved = hostDao.getById(hostId) ?: host
+                    if (saved.knownHostsEntry == null)
+                        hostDao.upsert(saved.copy(knownHostsEntry = session.hostKeyLine))
+                    // Simple mode: new jump keys → target's jumpHostKeys blob
+                    if (session.newJumpHostKeyLines.isNotEmpty()) {
+                        val current = hostDao.getById(hostId) ?: saved
+                        val existing = current.jumpHostKeys?.lines()?.filter { it.isNotBlank() } ?: emptyList()
+                        val toAdd = session.newJumpHostKeyLines.filter { it !in existing }
+                        if (toAdd.isNotEmpty())
+                            hostDao.upsert(current.copy(jumpHostKeys = (existing + toAdd).joinToString("\n")))
+                    }
+                    // Host-list mode: new jump keys → each jump host's own knownHostsEntry
+                    for ((jumpHostId, keyLine) in session.newJumpHostKeyUpdates) {
+                        val jCurrent = hostDao.getById(jumpHostId) ?: continue
+                        if (jCurrent.knownHostsEntry == null)
+                            hostDao.upsert(jCurrent.copy(knownHostsEntry = keyLine))
+                    }
+                    hostDao.recordConnection(hostId, System.currentTimeMillis())
+                    startReading(session)
+                    if (prefs.historySuggestions.first()) loadCommandHistory(session)
+                    return@launch
+                }
+
+                val err = result.exceptionOrNull()
+                if (isAuthFailure(err) && auth !is SshAuth.PublicKey) {
+                    _state.value = ConnectionState.PasswordPrompt(host.hostname, wrongPassword = true)
+                    val pwd = passwordResult.first()
+                    if (pwd.isEmpty()) {
+                        _state.value = ConnectionState.Disconnected()
+                        sessionManager.remove(id)
+                        if (sessionManager.sessions.value.isEmpty()) SshForegroundService.stop(getApplication())
+                        return@launch
+                    }
+                    auth = SshAuth.Password(pwd)
+                } else {
+                    val summary = err?.message?.takeIf { it.isNotBlank() }
+                        ?: getApplication<Application>().getString(R.string.error_connection_failed)
+                    _state.value = ConnectionState.Error(summary, err?.stackTraceToString())
+                    sessionManager.remove(id)
+                    if (sessionManager.sessions.value.isEmpty()) SshForegroundService.stop(getApplication())
+                    return@launch
+                }
+            }
+        }
+    }
+
+    /**
+     * Command run directly as the SSH channel (no shell underneath) when [HostEntity.tmuxEnabled] is set.
+     * [HostEntity.tmuxCommand] is a session name; the command is always "tmux new -As <name>", which
+     * attaches to (or creates) that session so reconnecting lands back in the same one. Blank falls
+     * back to the host label. A value that is already a full "tmux ..." command is used verbatim.
+     */
+    private fun tmuxCommand(host: HostEntity): String {
+        val custom = host.tmuxCommand?.trim().orEmpty()
+        if (custom.startsWith("tmux ")) return custom
+        val name = custom.ifBlank { host.label.ifBlank { host.hostname } }
+            .replace(Regex("[^A-Za-z0-9_-]+"), "-")
+            .trim('-')
+            .ifBlank { "session" }
+        return "tmux new -As $name"
+    }
+
+    private fun isAuthFailure(err: Throwable?): Boolean {
+        val msg = err?.message ?: return false
+        return msg.contains("Auth fail", ignoreCase = true) ||
+               msg.contains("Auth cancel", ignoreCase = true) ||
+               msg.contains("USERAUTH", ignoreCase = true) ||
+               msg.contains("authentication", ignoreCase = true)
+    }
+
+    private suspend fun buildJumpHostEntities(idList: String?): List<HostEntity> {
+        if (idList.isNullOrBlank()) return emptyList()
+        return idList.split(",").mapNotNull { it.trim().toLongOrNull() }
+            .mapNotNull { hostDao.getById(it) }
+    }
+
+    /**
+     * Public-key auth for [host]. A stored key is always unlocked — an encrypted one is unlocked
+     * at import — so nothing has to be asked for here. Null when the host has no key, or its key
+     * cannot be read.
+     */
+    private suspend fun keyAuthFor(host: HostEntity): SshAuth.PublicKey? {
+        val key = host.keyId?.let { keyDao.getById(it) } ?: return null
+        val pem = KeystoreManager.getPrivateKeyPem(key) ?: return null
+        return SshAuth.PublicKey(pem)
+    }
+
+    /** Non-interactive auth for jump hosts — password must already be saved. */
+    private suspend fun buildJumpAuth(host: HostEntity): SshAuth? {
+        val keyAuth = keyAuthFor(host)
+        return when {
+            keyAuth != null -> keyAuth
+            !host.encryptedPassword.isNullOrEmpty() ->
+                runCatching { SshAuth.Password(KeystoreManager.decrypt(host.encryptedPassword)) }.getOrNull()
+            !host.password.isNullOrEmpty() -> SshAuth.Password(host.password)
+            else -> null
+        }
+    }
+
+    private suspend fun buildAuth(host: HostEntity): SshAuth? {
+        val keyAuth = keyAuthFor(host)
+        return if (keyAuth != null) {
+            keyAuth
+        } else if (!host.encryptedPassword.isNullOrEmpty()) {
+            SshAuth.Password(KeystoreManager.decrypt(host.encryptedPassword))
+        } else if (!host.password.isNullOrEmpty()) {
+            SshAuth.Password(host.password)
+        } else {
+            _state.value = ConnectionState.PasswordPrompt(host.hostname)
+            val pwd = passwordResult.first()
+            if (pwd.isEmpty()) { _state.value = ConnectionState.Disconnected(); null }
+            else SshAuth.Password(pwd)
+        }
+    }
+
+    private fun startReading(session: ShellSession) {
+        val em = _emulator.value
+        em.onSendResponse = { bytes ->
+            runCatching { session.write(bytes) }
+        }
+        readerJob?.cancel()
+        readerJob = viewModelScope.launch(Dispatchers.IO) {
+            val buf = ByteArray(4096)
+            var cleanExit = false
+            // summary = short line under the title; detail = full technical cause (expandable).
+            var causeSummary: String? = null
+            var causeDetail: String? = null
+            // When the SSH session dies, JSch closes the channel and we only see EOF here — the
+            // real reason (e.g. "Software caused connection abort") is in JSch's log, not an
+            // exception. Use that reason as the short line and its detail (reason + stack) for the
+            // expandable section; fall back to a generic string.
+            val captureLoss = {
+                causeSummary = com.sshborg.data.ssh.SshDiagnostics.lastDisconnectReason()
+                    ?: getApplication<Application>().getString(R.string.terminal_connection_lost)
+                causeDetail = com.sshborg.data.ssh.SshDiagnostics.lastDisconnectDetail()
+            }
+            try {
+                while (isActive && session.isConnected) {
+                    val n = session.inputStream.read(buf)
+                    com.sshborg.data.ssh.SshDiagnostics.onRead(n)   // debug-only breadcrumb
+                    if (n < 0) {
+                        var waited = 0
+                        while (session.exitStatus == -1 && waited < 1000) {
+                            kotlinx.coroutines.delay(50)
+                            waited += 50
+                        }
+                        if (session.exitStatus != -1) {
+                            cleanExit = true
+                        } else {
+                            captureLoss()
+                        }
+                        break
+                    }
+                    synchronized(em) { em.process(buf, 0, n) }
+                    onNeedsRedraw?.invoke()
+                    detectPromptIfNeeded()
+                    scheduleUpdateSuggestions()
+                }
+                // Loop exited because session.isConnected flipped without EOF — unexpected disconnect.
+                if (isActive && !cleanExit && causeSummary == null) {
+                    if (session.exitStatus != -1) {
+                        cleanExit = true
+                    } else {
+                        captureLoss()
+                    }
+                }
+            } catch (e: Exception) {
+                // JSch may close the pipe via disconnect() before or instead of returning EOF,
+                // causing read() to throw IOException even on a clean exit. If exit-status is
+                // already set, treat it as a clean exit rather than an error.
+                if (session.exitStatus != -1) {
+                    cleanExit = true
+                } else {
+                    // Short summary from the exception; detail = just this exception's stack
+                    // trace (one relevant error, no cross-session log noise, no key info).
+                    causeSummary = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                    causeDetail = e.stackTraceToString()
+                }
+            }
+
+            // If the job was cancelled (background() called), don't touch the session
+            if (!isActive) return@launch
+
+            // Session ended — remove it from SessionManager so the notification updates
+            val id = sessionId ?: return@launch
+            if (sessionManager.get(id)?.shellSession === session) {
+                sessionManager.remove(id)
+                if (sessionManager.sessions.value.isEmpty()) {
+                    SshForegroundService.stop(getApplication())
+                }
+                if (cleanExit) {
+                    _navBack.tryEmit(Unit)
+                } else {
+                    // Debug builds append session/network breadcrumbs so a remote tester can copy
+                    // the error overlay instead of running adb logcat. No-op in release.
+                    val diag = com.sshborg.data.ssh.SshDiagnostics.snapshot()
+                    val detailWithDiag = if (diag != null) (causeDetail.orEmpty() + diag) else causeDetail
+                    _state.value = ConnectionState.Disconnected(causeSummary, detailWithDiag)
+                }
+            }
+        }
+    }
+
+    fun sendInput(data: ByteArray) {
+        // Enter (\r or \n) and Ctrl+C immediately clear suggestions — the line is gone.
+        if (data.size == 1 && (data[0] == 0x0D.toByte() || data[0] == 0x0A.toByte() || data[0] == 0x03.toByte())) {
+            _suggestions.value = emptyList()
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { shellSession?.write(data) }
+        }
+    }
+
+    /** Returns the correct escape sequence for a cursor key, respecting DECCKM mode. */
+    fun cursorKeyBytes(code: Char): ByteArray {
+        val appMode = _emulator.value.applicationCursorKeys
+        return if (appMode) "\u001bO$code".toByteArray() else "\u001b[$code".toByteArray()
+    }
+
+    fun resize(cols: Int, rows: Int) {
+        val em = _emulator.value
+        synchronized(em) { em.resize(cols, rows) }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { shellSession?.resize(cols, rows) }
+        }
+    }
+
+    fun acceptHostKey() { hostKeyResult.tryEmit(true) }
+    fun rejectHostKey() { hostKeyResult.tryEmit(false) }
+    fun submitPassword(password: String) { passwordResult.tryEmit(password) }
+
+    /** Stops the reading loop but keeps the session alive in [SessionManager]. */
+    fun background() {
+        readerJob?.cancel()
+        readerJob = null
+        onNeedsRedraw = null
+    }
+
+    /** Fully disconnects and removes the session from [SessionManager]. */
+    fun disconnect() {
+        val id = sessionId ?: return
+        connectJob?.cancel()
+        readerJob?.cancel()
+        shellSession = null
+        sessionManager.remove(id)
+        _state.value = ConnectionState.Disconnected()
+        if (sessionManager.sessions.value.isEmpty()) {
+            SshForegroundService.stop(getApplication())
+        }
+    }
+
+    // ── History suggestions helpers ───────────────────────────────────────────
+
+    /**
+     * Reads the shell history file over an SFTP channel on the terminal's own connection.
+     * Tries ~/.bash_history, ~/.zsh_history, and fish history in order.
+     * Silently does nothing if the channel or file read fails.
+     *
+     * It used to open a second SSH connection for this: a whole extra handshake and login
+     * (twice through a jump host, a second OTP prompt for keyboard-interactive users), and one
+     * that accepted whatever host key it was shown.
+     */
+    private fun loadCommandHistory(shell: ShellSession) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val sftp = runCatching { shell.openSftpChannel() }.getOrNull() ?: return@launch
+            try {
+                val home = runCatching { sftp.home }.getOrNull() ?: return@launch
+                val candidates = listOf(
+                    "$home/.bash_history",
+                    "$home/.zsh_history",
+                    "$home/.local/share/fish/fish_history",
+                )
+                for (path in candidates) {
+                    val content = runCatching {
+                        val out = ByteArrayOutputStream()
+                        sftp.get(path, out)
+                        out.toString(Charsets.UTF_8.name())
+                    }.getOrNull() ?: continue
+                    val commands = parseHistory(path, content)
+                    if (commands.isNotEmpty()) {
+                        val cmds = commands
+                            .reversed()
+                            .filter { it.length > 1 }
+                            .distinct()
+                            .take(100_000)
+                        _commandHistory.value = cmds
+                        // Cache on the session so a tab switch (new ViewModel) keeps it.
+                        sessionId?.let { id -> sessionManager.update(id) { it.copy(commandHistory = cmds) } }
+                        break
+                    }
+                }
+            } finally {
+                runCatching { sftp.disconnect() }
+            }
+        }
+    }
+
+    private fun parseHistory(path: String, content: String): List<String> {
+        val lines = content.lines()
+        return when {
+            path.endsWith("fish_history") ->
+                // fish format: "- cmd: git status\n  when: 12345"
+                lines.filter { it.startsWith("- cmd: ") }
+                     .map { it.removePrefix("- cmd: ").trim() }
+            path.endsWith("zsh_history") ->
+                // Extended format: ": 1234567890:0;command" — or plain one-per-line
+                lines.map { line ->
+                    Regex("""^: \d+:\d+;(.*)$""").matchEntire(line)?.groupValues?.get(1) ?: line
+                }.filter { it.isNotBlank() }
+            else ->
+                // bash_history: one command per line; timestamp lines start with '#'
+                lines.filter { it.isNotBlank() && !it.startsWith('#') }
+        }
+    }
+
+    /**
+     * Schedules a prompt detection after a short debounce.
+     * Runs only until the prompt is detected for the first time.
+     */
+    private fun detectPromptIfNeeded() {
+        if (promptDetected) return
+        promptDetectJob?.cancel()
+        promptDetectJob = viewModelScope.launch {
+            delay(300)
+            val em = _emulator.value
+            val lineText = synchronized(em) {
+                em.buffer.getRowText(em.buffer.cursorRow).trimEnd()
+            }
+            if (lineText.isEmpty()) return@launch
+            // Match everything up to and including a prompt marker ($, #, %, ❯, >) followed by a space
+            val m = Regex("""^(.*?[\$#%❯>])\s""").find(lineText) ?: return@launch
+            promptPrefix = m.groupValues[1] + " "
+            promptDetected = true
+            // Cache on the session so a tab switch (new ViewModel) keeps it.
+            sessionId?.let { id -> sessionManager.update(id) { it.copy(promptPrefix = promptPrefix) } }
+        }
+    }
+
+    /**
+     * Returns the portion of the current terminal line that the user is typing,
+     * with the shell prompt stripped. Used for suggestion filtering.
+     */
+    fun getCurrentInputForCompletion(): String {
+        if (!promptDetected || promptPrefix.isEmpty()) return ""
+        val em = _emulator.value
+        val lineText = synchronized(em) {
+            em.buffer.getRowText(em.buffer.cursorRow, em.buffer.cursorCol)
+        }
+        if (lineText.startsWith(promptPrefix)) return lineText.removePrefix(promptPrefix)
+        // Prompt changed (e.g. after cd) — heuristic: text after last prompt marker
+        // Return "" rather than the raw line to avoid false positives
+        val m = Regex("""[\$#%❯>]\s(.*)$""").find(lineText)
+        return m?.groupValues?.get(1) ?: ""
+    }
+
+    /** Debounced update of the suggestions list based on current terminal input. */
+    private fun scheduleUpdateSuggestions() {
+        if (!promptDetected) return
+        suggestionsUpdateJob?.cancel()
+        suggestionsUpdateJob = viewModelScope.launch {
+            delay(80)
+            val history = _commandHistory.value
+            if (history.isEmpty()) return@launch
+            val input = getCurrentInputForCompletion()
+            _suggestions.value = if (input.length < 2) emptyList()
+            else history.filter { it.startsWith(input) && it != input }.take(8)
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        // Stop reading loop — session stays alive in background
+        background()
+        // If the connection never completed, clean up the dangling session
+        val id = sessionId ?: return
+        if (sessionManager.get(id)?.status == SessionManager.Status.Connecting) {
+            sessionManager.remove(id)
+            if (sessionManager.sessions.value.isEmpty()) {
+                SshForegroundService.stop(getApplication())
+            }
+        }
+    }
+}

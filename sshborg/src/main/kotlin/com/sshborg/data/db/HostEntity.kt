@@ -1,0 +1,79 @@
+// From SSHBorg (https://github.com/payne1982/sshborg), app/src/main/kotlin/com/sshborg/data/db/HostEntity.kt
+// Copyright payne1982. Licensed under the GNU GPL v3.0, see LICENSE. Copied unchanged on 2026-10-09.
+
+package com.sshborg.data.db
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+@Entity(tableName = "hosts")
+data class HostEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val label: String,
+    val hostname: String,
+    val port: Int = 22,
+    val username: String,
+    /** Null = password auth; non-null = ID of the key to use */
+    val keyId: Long? = null,
+    val password: String? = null,
+    val encryptedPassword: String? = null,
+    val knownHostsEntry: String? = null,
+    val agentForwarding: Boolean = false,
+    val lastConnected: Long? = null,
+    /** Comma-separated jump hosts: "host1:port,host2:port,..." — only used when agentForwarding=true */
+    val jumpHosts: String? = null,
+    /** Newline-separated known_hosts lines for each jump host, persisted after first connect */
+    val jumpHostKeys: String? = null,
+    /**
+     * Newline-separated local port-forwarding rules in SSH -L syntax:
+     * [bindAddr:]localPort:remoteHost:remotePort
+     * e.g. "8080:localhost:8080"
+     */
+    val portForwardings: String? = null,
+    /**
+     * Jump host mode: "simple" uses the [jumpHosts] text string,
+     * "host_list" uses [jumpHostIdList] (comma-separated host entity IDs).
+     */
+    val jumpMode: String = "simple",
+    /**
+     * Ordered comma-separated IDs of host entities to use as jump hosts.
+     * Only used when [jumpMode] == "host_list".
+     */
+    val jumpHostIdList: String? = null,
+    /**
+     * SFTP starting directory mode: "last" = auto-save last visited path,
+     * "fixed" = always use [sftpStartDir], "home" = always use server home.
+     */
+    val sftpStartMode: String = "last",
+    /** Persisted last-visited path ("last" mode) or user-specified path ("fixed" mode). */
+    val sftpStartDir: String? = null,
+    /** If true, the SFTP browser shows dotfiles (names starting with "."). Default hides them. */
+    val sftpShowHidden: Boolean = false,
+    /** If true, legacy/weak cipher algorithms are appended to the negotiation list (for old servers). */
+    val allowLegacyCiphers: Boolean = false,
+    /** Null = ungrouped; otherwise ID of the [GroupEntity] this host belongs to. */
+    val groupId: Long? = null,
+    /** Optional per-host ARGB color; overrides the group color. Null = group color or default. */
+    val color: Int? = null,
+    /**
+     * Position inside its section (ungrouped block or group) for the manual list order.
+     * Null until the manual order is first seeded, and on every host created afterwards,
+     * which is what makes new hosts land at the end of their section. See HostSort.
+     */
+    val position: Int? = null,
+    /** How many terminal sessions were opened to this host; drives the "most used" order. */
+    val connectCount: Int = 0,
+    /** If true, tmux runs in place of the shell on connect (see [tmuxCommand]). */
+    val tmuxEnabled: Boolean = false,
+    /**
+     * tmux session name used when [tmuxEnabled] is set (runs "tmux new -As <name>").
+     * Null/blank falls back to the host label.
+     */
+    val tmuxCommand: String? = null,
+    /**
+     * EC2 instance ID (i-…) this host stands for, set when Booter opens it. Booter sends the
+     * instance's current public IP each time, which replaces [hostname]: without an Elastic IP
+     * that address changes on every start.
+     */
+    val ec2InstanceId: String? = null,
+)

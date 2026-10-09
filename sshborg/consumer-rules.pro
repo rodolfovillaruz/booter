@@ -1,0 +1,28 @@
+# From SSHBorg (https://github.com/payne1982/sshborg), app/proguard-rules.pro
+# Copyright payne1982, GNU GPL v3.0. Copied unchanged on 2026-10-09.
+
+# ── JSch ─────────────────────────────────────────────────────────────────────
+# JSch loads algorithm implementations by class name via reflection.
+-keep class com.jcraft.jsch.** { *; }
+# JSch optional dependencies not available on Android — suppress all warnings.
+-dontwarn com.sun.jna.**
+-dontwarn com.jcraft.jsch.PageantConnector
+-dontwarn org.apache.logging.log4j.**
+-dontwarn org.slf4j.**
+-dontwarn org.ietf.jgss.**
+-dontwarn org.newsclub.net.unix.**
+
+# ── BouncyCastle ──────────────────────────────────────────────────────────────
+# Registered as a JCE provider; internal classes loaded by name.
+-keep class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**
+
+# ── Room ──────────────────────────────────────────────────────────────────────
+# Entities and DAOs are accessed via generated code; keep all annotations.
+-keep @androidx.room.Entity class * { *; }
+-keep @androidx.room.Dao class * { *; }
+
+# ── Kotlin coroutines / serialization internal ────────────────────────────────
+-keepclassmembernames class kotlinx.** {
+    volatile <fields>;
+}

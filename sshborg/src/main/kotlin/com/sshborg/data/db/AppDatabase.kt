@@ -1,0 +1,134 @@
+// From SSHBorg (https://github.com/payne1982/sshborg), app/src/main/kotlin/com/sshborg/data/db/AppDatabase.kt
+// Copyright payne1982. Licensed under the GNU GPL v3.0, see LICENSE. Copied unchanged on 2026-10-09.
+
+package com.sshborg.data.db
+
+import android.content.Context
+import androidx.room.Database
+import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+
+@Database(
+    entities = [HostEntity::class, SshKeyEntity::class, GroupEntity::class],
+    version = 15,
+    exportSchema = false,
+)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun hostDao(): HostDao
+    abstract fun sshKeyDao(): SshKeyDao
+    abstract fun groupDao(): GroupDao
+
+    companion object {
+        @Volatile private var instance: AppDatabase? = null
+
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN jumpHosts TEXT")
+                db.execSQL("ALTER TABLE hosts ADD COLUMN jumpHostKeys TEXT")
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ssh_keys ADD COLUMN encryptedBlob TEXT")
+            }
+        }
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN password TEXT")
+            }
+        }
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN encryptedPassword TEXT")
+            }
+        }
+
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN portForwardings TEXT")
+            }
+        }
+
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN jumpMode TEXT NOT NULL DEFAULT 'simple'")
+                db.execSQL("ALTER TABLE hosts ADD COLUMN jumpHostIdList TEXT")
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN sftpStartMode TEXT NOT NULL DEFAULT 'last'")
+                db.execSQL("ALTER TABLE hosts ADD COLUMN sftpStartDir TEXT")
+            }
+        }
+
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN allowLegacyCiphers INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `host_groups` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`color` INTEGER NOT NULL, " +
+                        "`collapsed` INTEGER NOT NULL DEFAULT 0)"
+                )
+                db.execSQL("ALTER TABLE hosts ADD COLUMN groupId INTEGER")
+            }
+        }
+
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN color INTEGER")
+            }
+        }
+
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN sftpShowHidden INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Nullable on purpose: "no manual position yet". Seeding them lazily when the
+                // manual order is first used keeps every insert path free of ordering logic.
+                db.execSQL("ALTER TABLE hosts ADD COLUMN position INTEGER")
+                db.execSQL("ALTER TABLE hosts ADD COLUMN connectCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE host_groups ADD COLUMN position INTEGER")
+            }
+        }
+
+        private val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN tmuxEnabled INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE hosts ADD COLUMN tmuxCommand TEXT")
+            }
+        }
+
+        private val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE hosts ADD COLUMN ec2InstanceId TEXT")
+            }
+        }
+
+        fun getInstance(context: Context): AppDatabase =
+            instance ?: synchronized(this) {
+                instance ?: Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "sshborg.db",
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15).build().also { instance = it }
+            }
+    }
+}

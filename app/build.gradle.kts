@@ -66,4 +66,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
     implementation("androidx.biometric:biometric:1.1.0")
+
+    implementation(project(":sshborg"))
 }

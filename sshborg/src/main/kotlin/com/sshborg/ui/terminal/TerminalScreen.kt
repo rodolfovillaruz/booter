@@ -1,0 +1,790 @@
+// From SSHBorg (https://github.com/payne1982/sshborg), app/src/main/kotlin/com/sshborg/ui/terminal/TerminalScreen.kt
+// Copyright payne1982. Licensed under the GNU GPL v3.0, see LICENSE. Copied unchanged on 2026-10-09.
+
+package com.sshborg.ui.terminal
+
+import androidx.activity.compose.BackHandler
+import androidx.appcompat.app.AppCompatDelegate
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.launch
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.sshborg.R
+import com.sshborg.SshBorgApp
+import com.sshborg.isTelevision
+import com.sshborg.data.AppPreferences
+import com.sshborg.service.SessionManager
+import com.sshborg.terminal.TerminalView
+import com.sshborg.ui.common.ProblemContent
+import kotlinx.coroutines.delay
+
+@Suppress("UNUSED_VARIABLE")
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+fun TerminalScreen(
+    sessionId: String,
+    sessions: List<SessionManager.ActiveSession>,
+    onBack: () -> Unit,
+    onSwitchSession: (String) -> Unit,
+    vm: TerminalViewModel = viewModel(),
+) {
+    val state    by vm.state.collectAsState()
+    val title    by vm.title.collectAsState()
+    val emulator by vm.emulatorFlow.collectAsState()
+
+    val app = LocalContext.current.applicationContext as SshBorgApp
+    val ctx = LocalContext.current
+    // On a TV the soft keyboard is a floating window that overlaps the extra-key bar
+    // instead of pushing it up; hide the bar while that keyboard is showing (a TV terminal
+    // is meant for a physical keyboard anyway). No effect on touch devices.
+    val isTv = remember { isTelevision(ctx) }
+    var inSelectionMode by remember { mutableStateOf(false) }
+    // Held here rather than in the ViewModel: the ViewModel outlives the composition,
+    // so a View reference there keeps the Activity alive after the screen is gone.
+    var terminalView by remember { mutableStateOf<TerminalView?>(null) }
+    val invertScroll  by app.appPreferences.invertTerminalScroll.collectAsState(initial = false)
+    val fontSize      by app.appPreferences.terminalFontSize.collectAsState(
+        initial = com.sshborg.data.AppPreferences.DEFAULT_TERMINAL_FONT_SIZE
+    )
+    val keepScreenOn  by app.appPreferences.keepScreenOn.collectAsState(initial = false)
+    val terminalScheme by app.appPreferences.terminalColorScheme.collectAsState(
+        initial = AppPreferences.TERMINAL_SCHEME_DARK
+    )
+    val doubleTapAction by app.appPreferences.doubleTapAction.collectAsState(
+        initial = AppPreferences.DOUBLE_TAP_NONE
+    )
+    val nightMode     by app.appPreferences.nightMode.collectAsState(
+        initial = AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+    )
+    // Mirrors SshBorgTheme's darkTheme resolution so "follow app" matches the chrome
+    val appDark = when (nightMode) {
+        AppCompatDelegate.MODE_NIGHT_YES -> true
+        AppCompatDelegate.MODE_NIGHT_NO  -> false
+        else -> isSystemInDarkTheme()
+    }
+    val terminalLight = when (terminalScheme) {
+        AppPreferences.TERMINAL_SCHEME_LIGHT      -> true
+        AppPreferences.TERMINAL_SCHEME_FOLLOW_APP -> !appDark
+        else                                      -> false
+    }
+    val suggestions   by vm.suggestions.collectAsState()
+    val extraBarPinned by vm.extraBarPinned.collectAsState()
+    val extraBar       by vm.extraBar.collectAsState()
+    val allExtraBars   by vm.allExtraBars.collectAsState()
+    val rootView = LocalView.current
+
+    // Tab bar data. All open Shell sessions, grouped by host (order preserved).
+    // One host  -> per-session tabs (#1 #2 …); many hosts -> one tab per host.
+    val currentSession = sessions.find { it.id == sessionId }
+    val allShellSessions = sessions.filter { it.type == SessionManager.SessionType.Shell }
+    val shellHostGroups = allShellSessions.groupBy { it.hostId }.values.toList()
+
+    var ctrlActive by remember { mutableStateOf(false) }
+    var altActive  by remember { mutableStateOf(false) }
+    var shiftActive by remember { mutableStateOf(false) }
+    var wordMode   by remember { mutableStateOf(false) }
+
+    val sendInput: (ByteArray) -> Unit = { input ->
+        // Shift is spent on whatever comes next: a lone letter is upper-cased here, and bar
+        // keys already arrive in their shifted form.
+        val bytes = if (shiftActive && input.size == 1 && input[0].toInt() in 'a'.code..'z'.code) {
+            byteArrayOf((input[0] - 0x20).toByte())
+        } else input
+        shiftActive = false
+        val out = when {
+            ctrlActive && bytes.size == 1 -> {
+                ctrlActive = false
+                val ch = bytes[0].toInt() and 0xFF
+                when (ch) {
+                    in 0x40..0x5F -> byteArrayOf((ch - 0x40).toByte())
+                    in 0x61..0x7A -> byteArrayOf((ch - 0x60).toByte())
+                    else -> bytes
+                }
+            }
+            altActive && bytes.size == 1 -> { altActive = false; byteArrayOf(0x1B, bytes[0]) }
+            else -> bytes
+        }
+        vm.sendInput(out)
+    }
+
+    // Reject host key on hardware back during verification
+    BackHandler(state is ConnectionState.HostKeyPrompt) { vm.rejectHostKey() }
+    // Cancel password prompt on hardware back
+    BackHandler(state is ConnectionState.PasswordPrompt) { vm.submitPassword(""); onBack() }
+
+    LaunchedEffect(state) {
+        if (state is ConnectionState.Connected) {
+            delay(300)
+            terminalView?.showKeyboard()
+        }
+    }
+
+    val imeVisible = WindowInsets.isImeVisible
+
+    Scaffold(
+        contentWindowInsets = WindowInsets(0),
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        title.ifEmpty { currentSession?.hostLabel ?: stringResource(R.string.terminal_title_default) },
+                        maxLines = 1
+                    )
+                },
+                navigationIcon = {
+                    // Back = send to background (don't disconnect)
+                    IconButton(onClick = { vm.background(); onBack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
+                    }
+                },
+                actions = {
+                    // Disconnect button
+                    IconButton(onClick = { vm.disconnect(); onBack() }) {
+                        Icon(Icons.Default.Close, contentDescription = stringResource(R.string.terminal_disconnect_cd))
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
+    ) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding)) {
+            // Bottom padding = max(IME, navigation bar): with the keyboard up the IME
+            // inset wins (as before); when the extra-key bar is pinned with the keyboard
+            // closed, the navigation-bar inset keeps that bar clear of the system bar.
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(
+                        WindowInsets.ime.union(WindowInsets.navigationBars)
+                            .only(WindowInsetsSides.Bottom)
+                    )
+            ) {
+                // Terminal view
+                AndroidView(
+                    factory = { factoryCtx ->
+                        TerminalView(factoryCtx).also { view ->
+                            view.emulator             = vm.emulatorFlow.value
+                            view.fontSizeSp            = fontSize.toFloat()
+                            view.invertScroll          = invertScroll
+                            view.doubleTapAction       = doubleTapAction
+                            view.keepScreenOn          = keepScreenOn
+                            view.lightScheme           = terminalLight
+                            view.onInput              = sendInput
+                            view.onResize             = { cols, rows -> vm.onTerminalSize(cols, rows) }
+                            view.onSelectionModeChanged = { active -> inSelectionMode = active }
+                            vm.onNeedsRedraw           = { view.postInvalidate() }
+                            terminalView               = view
+                        }
+                    },
+                    update = { view ->
+                        view.emulator             = emulator
+                        view.fontSizeSp            = fontSize.toFloat()
+                        view.invertScroll          = invertScroll
+                        view.doubleTapAction       = doubleTapAction
+                        view.keepScreenOn          = keepScreenOn
+                        view.lightScheme           = terminalLight
+                        view.onInput              = sendInput
+                        view.onResize             = { cols, rows -> vm.onTerminalSize(cols, rows) }
+                        view.onSelectionModeChanged = { active -> inSelectionMode = active }
+                        vm.onNeedsRedraw           = { view.postInvalidate() }
+                        terminalView               = view
+                        view.wordMode              = wordMode
+                        view.postInvalidate()
+                    },
+                    onRelease = {
+                        // onNeedsRedraw captures the view, so it has to go too
+                        terminalView     = null
+                        vm.onNeedsRedraw = null
+                    },
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                )
+
+                // Tab chips. Many hosts -> one tab per host (tap a multi-session host
+                // for a numbered popup); a single host with siblings -> per-session tabs.
+                if (shellHostGroups.size > 1) {
+                    HostTabRow(
+                        hostGroups = shellHostGroups,
+                        currentId  = sessionId,
+                        onSwitch   = onSwitchSession,
+                    )
+                } else if (allShellSessions.size > 1) {
+                    SessionTabRow(
+                        sessions       = allShellSessions,
+                        currentId      = sessionId,
+                        onSwitch       = onSwitchSession,
+                    )
+                }
+
+                // History suggestion chips — when keyboard is open and there are suggestions,
+                // or always when sticky mode is enabled (to prevent terminal resizing)
+                val suggestionsBarSticky by vm.suggestionsBarSticky.collectAsState()
+                // Paused in word mode: the keyboard shows its own suggestion strip there, and
+                // ours would compete with it. Emptying the list rather than hiding the row keeps
+                // sticky mode's promise — reserved height, so the terminal doesn't resize.
+                val shownSuggestions = if (wordMode) emptyList() else suggestions
+                if (imeVisible && (shownSuggestions.isNotEmpty() || suggestionsBarSticky)) {
+                    SuggestionRow(
+                        suggestions = shownSuggestions,
+                        sticky = suggestionsBarSticky,
+                        onSelect = { cmd ->
+                            val currentInput = vm.getCurrentInputForCompletion()
+                            if (currentInput.isNotEmpty() && cmd.startsWith(currentInput)) {
+                                // Complete in place: send only the remaining suffix
+                                sendInput(cmd.removePrefix(currentInput).toByteArray(Charsets.UTF_8))
+                            } else {
+                                // Fallback: clear line and retype full command
+                                sendInput(byteArrayOf(0x15))
+                                sendInput(cmd.toByteArray(Charsets.UTF_8))
+                            }
+                        },
+                    )
+                }
+
+                // Extra key bar — when the soft keyboard is open, or pinned to stay put.
+                // On a TV, suppress it while the soft keyboard shows (it would just overlap).
+                if ((imeVisible || extraBarPinned) && !(isTv && imeVisible)) {
+                    ExtraKeyBar(
+                        bar   = extraBar,
+                        bars  = allExtraBars,
+                        onSelectBar = { vm.selectExtraBar(it) },
+                        state = ExtraBarState(
+                            ctrlActive       = ctrlActive,
+                            altActive        = altActive,
+                            shiftActive      = shiftActive,
+                            wordMode         = wordMode,
+                            pinned           = extraBarPinned,
+                            keyboardVisible  = imeVisible,
+                            onCtrlToggle     = { ctrlActive = !ctrlActive },
+                            onAltToggle      = { altActive  = !altActive  },
+                            onShiftToggle    = { shiftActive = !shiftActive },
+                            onWordModeToggle = { wordMode   = !wordMode   },
+                            onPinToggle      = { vm.toggleExtraBarPinned() },
+                            onKeyboardToggle = {
+                                if (imeVisible) {
+                                    val imm = ctx.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                                        as android.view.inputmethod.InputMethodManager
+                                    imm.hideSoftInputFromWindow(rootView.windowToken, 0)
+                                } else {
+                                    terminalView?.showKeyboard()
+                                }
+                            },
+                            onKey            = { bytes -> sendInput(bytes) },
+                            cursorKeys       = { vm.cursorKeyBytes(it) },
+                        ),
+                    )
+                }
+            }
+
+            // Selection action bar — floats at the top of the terminal when in selection mode
+            if (inSelectionMode) {
+                val strCopied    = stringResource(R.string.action_copied)
+                val strSelection = stringResource(R.string.terminal_copy_selection)
+                val strAll       = stringResource(R.string.terminal_copy_all)
+                val strPaste     = stringResource(R.string.terminal_paste_cd)
+                // Reading the clip *description* (mime type), not its contents, so this does
+                // not fire the system clipboard-access notification — only the paste tap,
+                // which reads the actual text, does. Evaluated when the bar appears.
+                val cbCheck = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                val hasClipText = cbCheck.hasPrimaryClip() &&
+                    cbCheck.primaryClipDescription?.let {
+                        it.hasMimeType(android.content.ClipDescription.MIMETYPE_TEXT_PLAIN) ||
+                        it.hasMimeType(android.content.ClipDescription.MIMETYPE_TEXT_HTML)
+                    } == true
+                SelectionBar(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    labelCopySelection = strSelection,
+                    labelCopyAll       = strAll,
+                    onCopySelection = {
+                        val text = terminalView?.getSelectedText() ?: ""
+                        if (text.isNotEmpty()) {
+                            val cb = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                    as android.content.ClipboardManager
+                            cb.setPrimaryClip(android.content.ClipData.newPlainText("terminal", text))
+                            android.widget.Toast.makeText(ctx, strCopied, android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                        terminalView?.exitSelectionMode()
+                    },
+                    onCopyAll = {
+                        val text = terminalView?.getAllText() ?: ""
+                        if (text.isNotEmpty()) {
+                            val cb = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                    as android.content.ClipboardManager
+                            cb.setPrimaryClip(android.content.ClipData.newPlainText("terminal", text))
+                            android.widget.Toast.makeText(ctx, strCopied, android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                        terminalView?.exitSelectionMode()
+                    },
+                    labelPaste = if (hasClipText) strPaste else null,
+                    onPaste = if (hasClipText) {
+                        {
+                            val cb = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                    as android.content.ClipboardManager
+                            val pasteText = cb.primaryClip?.getItemAt(0)?.coerceToText(ctx)?.toString()
+                            if (!pasteText.isNullOrEmpty()) sendInput(pasteText.toByteArray(Charsets.UTF_8))
+                            terminalView?.exitSelectionMode()
+                        }
+                    } else null,
+                )
+            }
+
+            // State overlays
+            when (val s = state) {
+                is ConnectionState.Connecting      -> LoadingOverlay(stringResource(R.string.terminal_connecting))
+                is ConnectionState.PasswordPrompt  -> PasswordDialog(
+                    hostname      = s.hostname,
+                    wrongPassword = s.wrongPassword,
+                    onConfirm     = vm::submitPassword,
+                    onDismiss     = { vm.submitPassword(""); onBack() },
+                )
+                is ConnectionState.HostKeyPrompt   -> HostKeyDialog(
+                    hostname    = s.hostname,
+                    fingerprint = s.fingerprint,
+                    onAccept    = { vm.acceptHostKey() },
+                    onReject    = { vm.rejectHostKey() },
+                )
+                is ConnectionState.Error           -> ErrorOverlay(message = s.message, detail = s.detail, onBack = onBack)
+                is ConnectionState.Disconnected    -> DisconnectedOverlay(
+                    summary = s.summary,
+                    detail  = s.detail,
+                    onClose = { vm.disconnect(); onBack() },
+                )
+                is ConnectionState.Connected       -> { /* normal */ }
+            }
+        }
+    }
+
+    // Attach on first composition. The connection itself is started by the first
+    // terminal-size measurement (vm.onTerminalSize) so the PTY opens at the real
+    // width; this only arms a fallback in case that measurement is slow to arrive.
+    LaunchedEffect(sessionId) {
+        vm.attach(sessionId)
+        delay(400)
+        vm.connectWithDefaultsIfPending()
+    }
+
+    // Auto-navigate back when the remote shell exits cleanly
+    LaunchedEffect(Unit) {
+        vm.navBack.collect { onBack() }
+    }
+
+    // Dismiss keyboard on screen exit — unless we're just switching to a
+    // sibling tab, in which case the incoming screen keeps the keyboard up.
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        onDispose {
+            if (app.sessionManager.switchingTab) {
+                app.sessionManager.switchingTab = false
+            } else {
+                val imm = view.context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                        as android.view.inputmethod.InputMethodManager
+                imm.hideSoftInputFromWindow(view.windowToken, 0)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionTabRow(
+    sessions: List<SessionManager.ActiveSession>,
+    currentId: String,
+    onSwitch: (String) -> Unit,
+) {
+    // Browser-style tabs: rounded only at the top so each tab reads as a
+    // little "page tab" sitting under the terminal. The active tab is filled
+    // (surface, matching the terminal) with bold primary text; the inactive
+    // ones are flat and dim with a thin outline so they look recessed.
+    val tabShape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 4.dp)
+            .padding(top = 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        sessions.forEachIndexed { index, session ->
+            val selected = session.id == currentId
+            Box(
+                modifier = Modifier
+                    .clip(tabShape)
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.surface
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    .then(
+                        if (selected) Modifier
+                        else Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, tabShape)
+                    )
+                    .clickable(enabled = !selected) { onSwitch(session.id) }
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text       = "#${index + 1}",
+                    fontSize   = 12.sp,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                    color      = if (selected) MaterialTheme.colorScheme.primary
+                                 else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Cross-host tab bar: one tab per host. Tapping a host with a single session jumps
+ * straight to it; a host with several sessions expands an in-layout numbered picker
+ * ABOVE the tabs (an inline row, not a focus-stealing popup — so the soft keyboard
+ * stays up and nothing shifts) to choose which session to open.
+ */
+@Composable
+private fun HostTabRow(
+    hostGroups: List<List<SessionManager.ActiveSession>>,
+    currentId: String,
+    onSwitch: (String) -> Unit,
+) {
+    val tabShape  = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp)
+    val pillShape = RoundedCornerShape(8.dp)
+    var expandedHostId by remember { mutableStateOf<Long?>(null) }
+    val expandedGroup = hostGroups.find { it.first().hostId == expandedHostId }
+
+    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)) {
+        // Numbered session picker for the expanded multi-session host, drawn above the
+        // tabs so it reads as opening "upward" from the host tab that spawned it.
+        if (expandedGroup != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                expandedGroup.forEachIndexed { index, session ->
+                    val here = session.id == currentId
+                    Box(
+                        modifier = Modifier
+                            .clip(pillShape)
+                            .background(
+                                if (here) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                else MaterialTheme.colorScheme.surface
+                            )
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, pillShape)
+                            .clickable {
+                                expandedHostId = null
+                                if (!here) onSwitch(session.id)
+                            }
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                    ) {
+                        Text(
+                            text       = "#${index + 1}",
+                            fontSize   = 12.sp,
+                            fontWeight = if (here) FontWeight.Bold else FontWeight.Normal,
+                            color      = if (here) MaterialTheme.colorScheme.primary
+                                         else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 4.dp)
+                .padding(top = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            hostGroups.forEach { group ->
+                val selected = group.any { it.id == currentId }
+                val expanded = group.first().hostId == expandedHostId
+                val label    = group.first().hostLabel
+                val color    = if (selected) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                Box(
+                    modifier = Modifier
+                        .clip(tabShape)
+                        .background(
+                            if (selected) MaterialTheme.colorScheme.surface
+                            else MaterialTheme.colorScheme.surfaceVariant
+                        )
+                        .then(
+                            if (selected) Modifier
+                            else Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, tabShape)
+                        )
+                        .clickable {
+                            if (group.size == 1) {
+                                expandedHostId = null
+                                if (group[0].id != currentId) onSwitch(group[0].id)
+                            } else {
+                                // toggle the picker for this host
+                                expandedHostId = if (expanded) null else group.first().hostId
+                            }
+                        }
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text       = label,
+                            fontSize   = 12.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color      = color,
+                            maxLines   = 1,
+                            overflow   = TextOverflow.Ellipsis,
+                            modifier   = Modifier.widthIn(max = 120.dp),
+                        )
+                        if (group.size > 1) {
+                            Text(
+                                text       = " (${group.size})",
+                                fontSize   = 12.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                color      = color,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SuggestionRow(suggestions: List<String>, sticky: Boolean, onSelect: (String) -> Unit) {
+    LazyRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surface)
+            .then(if (sticky) Modifier.heightIn(min = 40.dp) else Modifier),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 1.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(suggestions) { cmd ->
+            Box(
+                modifier = Modifier
+                    .widthIn(max = 220.dp)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(50))
+                    .clickable { onSelect(cmd) }
+                    .padding(horizontal = 10.dp, vertical = 3.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    cmd,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LoadingOverlay(message: String) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Surface(color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f), shape = MaterialTheme.shapes.medium) {
+            Row(Modifier.padding(24.dp), verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(24.dp))
+                Spacer(Modifier.width(16.dp))
+                Text(message)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PasswordDialog(
+    hostname: String,
+    wrongPassword: Boolean = false,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var password by remember(wrongPassword) { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.password_dialog_title, hostname)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (wrongPassword) {
+                    Text(
+                        stringResource(R.string.password_auth_failed),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text(stringResource(R.string.password_field_label)) },
+                    visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { onConfirm(password) }),
+                    singleLine = true,
+                    isError = wrongPassword,
+                    trailingIcon = {
+                        TextButton(onClick = { passwordVisible = !passwordVisible }) {
+                            Text(
+                                if (passwordVisible) stringResource(R.string.action_hide)
+                                else stringResource(R.string.action_show)
+                            )
+                        }
+                    },
+                )
+            }
+        },
+        confirmButton = {
+            OutlinedButton(onClick = { onConfirm(password) }) {
+                Text(stringResource(R.string.action_connect))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+        },
+    )
+}
+
+@Composable
+private fun HostKeyDialog(hostname: String, fingerprint: String, onAccept: () -> Unit, onReject: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onReject,
+        title = { Text(stringResource(R.string.hostkey_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(stringResource(R.string.hostkey_terminal_host, hostname))
+                Text(stringResource(R.string.hostkey_terminal_fingerprint))
+                Text(fingerprint, style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.hostkey_terminal_trust_question))
+            }
+        },
+        confirmButton = {
+            OutlinedButton(onClick = onAccept) { Text(stringResource(R.string.action_trust)) }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onReject,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                border = ButtonDefaults.outlinedButtonBorder(enabled = true).copy(brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.error)),
+            ) { Text(stringResource(R.string.action_reject)) }
+        },
+    )
+}
+
+@Composable
+private fun ErrorOverlay(message: String, detail: String?, onBack: () -> Unit) {
+    // Sit high (≈¼ from the top), not centred: on some devices the terminal keyboard stays up
+    // and would hide the expanded Details if the box were centred.
+    Box(Modifier.fillMaxSize(), contentAlignment = BiasAlignment(0f, -0.5f)) {
+        Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium) {
+            ProblemContent(
+                title        = stringResource(R.string.terminal_connection_failed),
+                summary      = message,
+                detail       = detail,
+                primaryLabel = stringResource(R.string.action_go_back),
+                onPrimary    = onBack,
+                modifier     = Modifier.padding(24.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SelectionBar(
+    labelCopySelection: String,
+    labelCopyAll: String,
+    onCopySelection: () -> Unit,
+    onCopyAll: () -> Unit,
+    modifier: Modifier = Modifier,
+    // Paste is offered here too (issue #9), a placement common in terminal apps. It pastes the
+    // device clipboard at the cursor, not the current selection — a different layer, but
+    // the placement users already expect. Shown only when the caller passes both, i.e.
+    // when the clipboard actually holds text.
+    labelPaste: String? = null,
+    onPaste: (() -> Unit)? = null,
+) {
+    Surface(
+        modifier       = modifier,
+        color          = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 4.dp,
+        shadowElevation = 4.dp,
+        shape          = MaterialTheme.shapes.medium,
+    ) {
+        Row(
+            modifier              = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment     = Alignment.CenterVertically,
+        ) {
+            // "Copy all" used to sit right next to "Copy selection" with the same look and
+            // the same first word, and got tapped by mistake. The two everyday actions keep
+            // their plain style; the rare one goes last, after a gap, smaller and dimmer.
+            TextButton(onClick = onCopySelection) { Text(labelCopySelection) }
+            if (labelPaste != null && onPaste != null) {
+                TextButton(onClick = onPaste) { Text(labelPaste) }
+            }
+            Spacer(Modifier.width(10.dp))
+            TextButton(
+                onClick = onCopyAll,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+            ) { Text(labelCopyAll, style = MaterialTheme.typography.labelMedium) }
+        }
+    }
+}
+
+@Composable
+private fun DisconnectedOverlay(summary: String?, detail: String?, onClose: () -> Unit) {
+    // See ErrorOverlay: high, not centred, so expanded Details clear a still-open keyboard.
+    Box(Modifier.fillMaxSize(), contentAlignment = BiasAlignment(0f, -0.5f)) {
+        Surface(color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f), shape = MaterialTheme.shapes.medium) {
+            ProblemContent(
+                title        = stringResource(R.string.terminal_disconnected),
+                summary      = summary,
+                detail       = detail,
+                primaryLabel = stringResource(R.string.action_close),
+                onPrimary    = onClose,
+                modifier     = Modifier.padding(24.dp),
+            )
+        }
+    }
+}

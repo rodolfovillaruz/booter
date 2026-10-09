@@ -1,0 +1,154 @@
+// From SSHBorg (https://github.com/payne1982/sshborg), app/src/main/kotlin/com/sshborg/data/ssh/SshConnectionParams.kt
+// Copyright payne1982. Licensed under the GNU GPL v3.0, see LICENSE. Copied unchanged on 2026-10-09.
+
+package com.sshborg.data.ssh
+
+/**
+ * A single local port-forwarding rule (-L).
+ * Connections to [bindAddress]:[localPort] are tunnelled to [remoteHost]:[remotePort]
+ * through the SSH session.
+ */
+data class PortForwarding(
+    val bindAddress: String = "127.0.0.1",
+    val localPort: Int,
+    val remoteHost: String,
+    val remotePort: Int,
+)
+
+/**
+ * Parses a newline-separated list of -L forwarding specs into [PortForwarding] objects.
+ * Accepted formats:  localPort:remoteHost:remotePort
+ *                    bindAddress:localPort:remoteHost:remotePort
+ * Lines that are blank or unparseable are silently skipped.
+ */
+fun parsePortForwardings(raw: String?): List<PortForwarding> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return raw.lines().mapNotNull { line ->
+        val spec = line.trim().removePrefix("-L").trim()
+        if (spec.isEmpty()) return@mapNotNull null
+        val parts = spec.split(":")
+        when (parts.size) {
+            3 -> {
+                val lPort = parts[0].toIntOrNull() ?: return@mapNotNull null
+                val rPort = parts[2].toIntOrNull() ?: return@mapNotNull null
+                PortForwarding(localPort = lPort, remoteHost = parts[1], remotePort = rPort)
+            }
+            4 -> {
+                val lPort = parts[1].toIntOrNull() ?: return@mapNotNull null
+                val rPort = parts[3].toIntOrNull() ?: return@mapNotNull null
+                PortForwarding(bindAddress = parts[0], localPort = lPort, remoteHost = parts[2], remotePort = rPort)
+            }
+            else -> null
+        }
+    }
+}
+
+/** A single jump host in a ProxyJump chain. */
+data class JumpHost(
+    val host: String,
+    val port: Int,
+    /** If null, the target host's username is used for this hop. */
+    val username: String?,
+    /** Known-hosts line for this jump host — null on first connect, non-null on subsequent connects. */
+    val knownHostsEntry: String?,
+    /**
+     * Explicit auth for this hop. If null, the target host's auth is used (simple-mode behaviour).
+     * Set when the jump host comes from the host-list (each hop has its own credentials).
+     */
+    val auth: SshAuth? = null,
+    /**
+     * DB id of the HostEntity this hop was built from (host-list mode only).
+     * Used to persist newly-seen host keys back to the jump host's own record.
+     */
+    val hostId: Long? = null,
+)
+
+/** All parameters needed to open an SSH connection. */
+data class SshConnectionParams(
+    val hostname: String,
+    val port: Int = 22,
+    val username: String,
+    val auth: SshAuth,
+    val agentForwarding: Boolean = false,
+    /** If null, fingerprint verification is skipped (only on first connect) */
+    val knownHostsEntry: String? = null,
+    /** Ordered list of SSH jump hosts to tunnel through before reaching the target. */
+    val jumpHosts: List<JumpHost> = emptyList(),
+    /** Local port-forwarding rules to activate after connecting. */
+    val portForwardings: List<PortForwarding> = emptyList(),
+    /** If true, legacy/weak ciphers are appended to the negotiation list (for old servers). */
+    val allowLegacyCiphers: Boolean = false,
+)
+
+sealed interface SshAuth {
+    data class Password(val password: String) : SshAuth
+    data class PublicKey(val privateKeyPem: String, val passphrase: String? = null) : SshAuth
+}
+
+/**
+ * Parses a jump-hosts string ("user@host1:22,host2:port") and a newline-delimited known_hosts
+ * blob into a list of [JumpHost].
+ *
+ * Each token format: [user@]host[:port]  — user and port are optional.
+ */
+fun parseJumpHosts(raw: String?, knownKeysBlob: String?): List<JumpHost> {
+    if (raw.isNullOrBlank()) return emptyList()
+    // Build a map: "host:port" -> known_hosts line.
+    // JSch writes port-22 entries as "hostname ..." and non-22 entries as "[hostname]:port ...".
+    // Normalise both to "host:port" so the lookup below always works regardless of port.
+    val keysByHost: Map<String, String> = knownKeysBlob
+        ?.lines()
+        ?.filter { it.isNotBlank() }
+        ?.mapNotNull { line ->
+            val marker = line.substringBefore(" ")
+            val canonical = if (marker.startsWith("[")) {
+                // [host]:port format
+                val h = marker.substringAfter("[").substringBefore("]")
+                val p = marker.substringAfterLast("]:").toIntOrNull() ?: 22
+                "$h:$p"
+            } else {
+                // bare hostname → port 22
+                "$marker:22"
+            }
+            canonical to line
+        }
+        ?.toMap()
+        ?: emptyMap()
+    return raw.split(",").mapNotNull { token ->
+        val trimmed = token.trim()
+        if (trimmed.isEmpty()) return@mapNotNull null
+
+        // Split off optional username: user@host:port
+        val atIdx = trimmed.indexOf('@')
+        val username: String?
+        val hostPort: String
+        if (atIdx != -1) {
+            username = trimmed.substring(0, atIdx).takeIf { it.isNotEmpty() }
+            hostPort = trimmed.substring(atIdx + 1)
+        } else {
+            username = null
+            hostPort = trimmed
+        }
+
+        // Split host:port — only treat the suffix as a port if it's a valid port number,
+        // so that plain hostnames with dots (e.g. server.example.com) are never mangled.
+        val lastColon = hostPort.lastIndexOf(':')
+        val host: String
+        val port: Int
+        if (lastColon == -1) {
+            host = hostPort
+            port = 22
+        } else {
+            val possiblePort = hostPort.substring(lastColon + 1).toIntOrNull()
+            if (possiblePort != null && possiblePort in 1..65535) {
+                host = hostPort.substring(0, lastColon)
+                port = possiblePort
+            } else {
+                host = hostPort
+                port = 22
+            }
+        }
+
+        JumpHost(host, port, username, keysByHost["$host:$port"])
+    }
+}

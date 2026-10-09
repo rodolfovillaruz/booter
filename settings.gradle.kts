@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Booter"
 include(":app")
+include(":sshborg")
