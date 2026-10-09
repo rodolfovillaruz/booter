@@ -26,8 +26,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -62,6 +63,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -170,7 +172,7 @@ fun InstancesScreen(
             ) {
                 item {
                     Text(
-                        "Tap to open in SSHBorg · long-press to copy public IP · swipe left to start · swipe right on a running instance to resize",
+                        "Tap or swipe right to open in SSHBorg · long-press to copy public IP · swipe left to start, or to resize a running instance",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -192,7 +194,7 @@ fun InstancesScreen(
                         onStartRequest = { startTarget = instance },
                         onResizeRequest = { resizeTarget = instance },
                         onCancelResize = { onCancelResize(instance.id) },
-                        onClick = { openInSshBorg(instance) },
+                        onOpen = { openInSshBorg(instance) },
                         onLongClick = { copyPublicIp(instance) },
                     )
                 }
@@ -235,7 +237,8 @@ fun InstancesScreen(
     }
 }
 
-private enum class SwipeDirection { Left, Right }
+/** What a swipe does, and the label and icon shown behind the row while swiping. */
+private class SwipeAction(val label: String, val icon: ImageVector, val run: () -> Unit)
 
 @Composable
 private fun InstanceRow(
@@ -245,20 +248,24 @@ private fun InstanceRow(
     onStartRequest: () -> Unit,
     onResizeRequest: () -> Unit,
     onCancelResize: () -> Unit,
-    onClick: () -> Unit,
+    onOpen: () -> Unit,
     onLongClick: () -> Unit,
 ) {
     // A pending resize boots the instance on its own, so it can't be started or resized meanwhile.
     val canStart = instance.state == "stopped" && !busy && pendingSize == null
     val canResize = instance.state == "running" && !busy && pendingSize == null
+    // Opening stays available during a pending resize: SSHBorg is where you shut it down.
+    val canOpen = instance.state == "running"
 
     SwipeableRow(
-        canSwipeLeft = canStart,
-        canSwipeRight = canResize,
-        onSwipeLeft = onStartRequest,
-        onSwipeRight = onResizeRequest,
+        left = when {
+            canStart -> SwipeAction("Start", Icons.Filled.PlayArrow, onStartRequest)
+            canResize -> SwipeAction("Resize", Icons.Filled.Build, onResizeRequest)
+            else -> null
+        },
+        right = if (canOpen) SwipeAction("SSHBorg", Icons.AutoMirrored.Filled.ExitToApp, onOpen) else null,
     ) {
-        InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onClick, onLongClick)
+        InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onOpen, onLongClick)
     }
 }
 
@@ -269,10 +276,8 @@ private fun InstanceRow(
  */
 @Composable
 private fun SwipeableRow(
-    canSwipeLeft: Boolean,
-    canSwipeRight: Boolean,
-    onSwipeLeft: () -> Unit,
-    onSwipeRight: () -> Unit,
+    left: SwipeAction?,
+    right: SwipeAction?,
     content: @Composable () -> Unit,
 ) {
     val density = LocalDensity.current
@@ -281,14 +286,12 @@ private fun SwipeableRow(
     var width by remember { mutableIntStateOf(0) }
     var offsetX by remember { mutableFloatStateOf(0f) }
 
-    val latestCanLeft by rememberUpdatedState(canSwipeLeft)
-    val latestCanRight by rememberUpdatedState(canSwipeRight)
-    val latestOnLeft by rememberUpdatedState(onSwipeLeft)
-    val latestOnRight by rememberUpdatedState(onSwipeRight)
+    val latestLeft by rememberUpdatedState(left)
+    val latestRight by rememberUpdatedState(right)
 
     val dragState = rememberDraggableState { delta ->
-        val min = if (latestCanLeft) -width.toFloat() else 0f
-        val max = if (latestCanRight) width.toFloat() else 0f
+        val min = if (latestLeft != null) -width.toFloat() else 0f
+        val max = if (latestRight != null) width.toFloat() else 0f
         offsetX = (offsetX + delta).coerceIn(min, max)
     }
 
@@ -298,37 +301,39 @@ private fun SwipeableRow(
             .draggable(
                 state = dragState,
                 orientation = Orientation.Horizontal,
-                enabled = canSwipeLeft || canSwipeRight,
+                enabled = left != null || right != null,
                 onDragStopped = { velocity ->
                     val farEnough = abs(offsetX) >= width * 0.25f
                     val flung = abs(offsetX) >= minFlingDistance && abs(velocity) >= flingVelocity &&
                         sign(velocity) == sign(offsetX)
                     if (farEnough || flung) {
-                        if (offsetX > 0 && latestCanRight) latestOnRight()
-                        if (offsetX < 0 && latestCanLeft) latestOnLeft()
+                        val action = if (offsetX > 0) latestRight else latestLeft
+                        action?.run?.invoke()
                     }
                     animate(offsetX, 0f) { value, _ -> offsetX = value }
                 },
             ),
     ) {
-        val direction = when {
-            offsetX > 0f -> SwipeDirection.Right
-            offsetX < 0f -> SwipeDirection.Left
+        val revealed = when {
+            offsetX > 0f -> right?.let { it to true }
+            offsetX < 0f -> left?.let { it to false }
             else -> null
         }
-        if (direction != null) {
-            Box(Modifier.matchParentSize()) { SwipeBackground(direction) }
+        if (revealed != null) {
+            Box(Modifier.matchParentSize()) { SwipeBackground(revealed.first, fromStart = revealed.second) }
         }
         Box(Modifier.offset { IntOffset(offsetX.roundToInt(), 0) }) { content() }
     }
 }
 
+/** [fromStart]: the row is swiped right, so the action shows at its start. */
 @Composable
-private fun SwipeBackground(direction: SwipeDirection) {
+private fun SwipeBackground(action: SwipeAction, fromStart: Boolean) {
     val colors = MaterialTheme.colorScheme
-    val (color, alignment) = when (direction) {
-        SwipeDirection.Left -> colors.primaryContainer to Alignment.CenterEnd
-        SwipeDirection.Right -> colors.tertiaryContainer to Alignment.CenterStart
+    val (color, onColor) = if (fromStart) {
+        colors.tertiaryContainer to colors.onTertiaryContainer
+    } else {
+        colors.primaryContainer to colors.onPrimaryContainer
     }
     Box(
         modifier = Modifier
@@ -336,17 +341,17 @@ private fun SwipeBackground(direction: SwipeDirection) {
             .clip(CardDefaults.shape)
             .background(color)
             .padding(horizontal = 24.dp),
-        contentAlignment = alignment,
+        contentAlignment = if (fromStart) Alignment.CenterStart else Alignment.CenterEnd,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (direction == SwipeDirection.Left) {
-                Text("Start", color = colors.onPrimaryContainer)
+            if (fromStart) {
+                Icon(action.icon, contentDescription = null, tint = onColor)
                 Spacer(Modifier.width(8.dp))
-                Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = colors.onPrimaryContainer)
+                Text(action.label, color = onColor)
             } else {
-                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = colors.onTertiaryContainer)
+                Text(action.label, color = onColor)
                 Spacer(Modifier.width(8.dp))
-                Text("Resize", color = colors.onTertiaryContainer)
+                Icon(action.icon, contentDescription = null, tint = onColor)
             }
         }
     }
