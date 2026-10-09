@@ -62,22 +62,27 @@ fun BooterApp(
             unlock = unlock,
         )
 
-        else -> InstancesScreen(
-            state = state,
-            snackbarHostState = snackbarHostState,
-            onRefresh = vm::refresh,
-            onOpenSettings = { showSettings = true },
-            onStart = vm::start,
-            onResize = vm::requestResize,
-            onCancelResize = vm::cancelResize,
-            onDismissShutdownNotice = vm::dismissShutdownNotice,
-            onOpenLaunch = vm::openLaunch,
-            onLaunch = vm::launch,
-            onRetryLaunchOptions = vm::retryLaunchOptions,
-            onDismissLaunch = vm::dismissLaunch,
-            onSshBorgKey = vm::useSshBorgKey,
-            onImportKeyAs = vm::importKeyAs,
-            onCancelKeyImport = vm::cancelKeyImport,
-        )
+        else -> SshNavigation { ssh ->
+            InstancesScreen(
+                state = state,
+                snackbarHostState = snackbarHostState,
+                onRefresh = vm::refresh,
+                onOpenSettings = { showSettings = true },
+                onOpenInstance = ssh.openInstance,
+                onOpenKeys = ssh.openKeys,
+                onOpenKeyBars = ssh.openKeyBars,
+                onStart = vm::start,
+                onResize = vm::requestResize,
+                onCancelResize = vm::cancelResize,
+                onDismissShutdownNotice = vm::dismissShutdownNotice,
+                onOpenLaunch = vm::openLaunch,
+                onLaunch = vm::launch,
+                onRetryLaunchOptions = vm::retryLaunchOptions,
+                onDismissLaunch = vm::dismissLaunch,
+                onSavedKey = vm::useSavedKey,
+                onImportKeyAs = vm::importKeyAs,
+                onCancelKeyImport = vm::cancelKeyImport,
+            )
+        }
     }
 }

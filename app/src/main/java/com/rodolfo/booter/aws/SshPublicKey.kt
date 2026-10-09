@@ -3,7 +3,7 @@ package com.rodolfo.booter.aws
 import java.security.MessageDigest
 import java.util.Base64
 
-/** An OpenSSH public key ("type base64 [comment]"), as SSHBorg hands it over and AWS stores it. */
+/** An OpenSSH public key ("type base64 [comment]"), as the Keys screen stores it and AWS stores it. */
 class SshPublicKey private constructor(val type: String, private val blob: ByteArray) {
 
     /** "type base64", without a comment. */

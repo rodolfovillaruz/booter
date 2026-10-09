@@ -6,12 +6,16 @@ A personal Android app for booting EC2 instances.
   on-device with an Android Keystore AES-256-GCM key that can only be used after a fingerprint scan.
   If you add or remove a fingerprint, that key is invalidated and you'll need to enter the AWS keys again.
 - **Main list**: shows every non-terminated instance in the region. **Tap** a running instance, or
-  swipe it **right**, to open it in [SSHBorg](https://sshborg.com); **long-press** to copy its public IP.
-- **SSHBorg**: the first tap on an instance opens SSHBorg's new-host form, prefilled with the instance
-  name and IP; add the username and key and save, and it connects. SSHBorg links that host to the
-  instance ID, so later taps connect straight away and update the IP, which changes on every start
-  without an Elastic IP. An existing SSHBorg host already pointing at the instance's current IP gets
-  linked automatically.
+  swipe it **right**, to open a terminal on it; **long-press** to copy its public IP.
+- **Terminal**: built in, from [SSHBorg](https://github.com/payne1982/sshborg). The first tap on an
+  instance asks for the username (`ec2-user` on Amazon Linux, `ubuntu` on Ubuntu) and which of your
+  SSH keys to use, then connects. Booter saves that as a host linked to the instance ID, so later
+  taps connect straight away (or go back to the session that's already open) and update the IP,
+  which changes on every start without an Elastic IP. The host key is pinned on the first connect
+  and follows the instance to its new IP.
+- **SSH keys** (the key icon at the top): generate Ed25519, ECDSA, or RSA keys, or import one. They
+  live only in Booter.
+- **Key bars** (the ⋮ menu): pick or edit the extra-key bar shown above the keyboard in the terminal.
 - **Start** (the button, or swipe an entry **left**): pick `t3.micro` or `t3.large` every time. If the
   size you pick is different, Booter changes the instance type first and then starts it.
 - **Resize** (swipe a **running** entry **left**): pick the other size. Booter then tells you to shut
@@ -23,20 +27,21 @@ A personal Android app for booting EC2 instances.
   it works without a default VPC. The default VPC's subnets come first when there is one. Only the
   chosen subnet's VPC's groups are offered; each shows whether it allows SSH, and the first one that
   does is preselected. If none does, `default` is preselected, but it only allows traffic from
-  itself, so SSHBorg can't connect. The instance always gets a public IP (it still needs a subnet
+  itself, so SSH can't connect. The instance always gets a public IP (it still needs a subnet
   routed to an internet gateway to be reachable) and the image's default disk. Shutting it down
   from inside the OS stops it rather than terminating it.
-- **Key from SSHBorg**: the key pair list ends with **Use a key from SSHBorg…**, which opens SSHBorg's
-  key list. Only the public half of the key you pick comes back. Booter looks for an AWS key pair
+- **Your own key**: the key pair list ends with **Use one of your SSH keys…**, which lists the keys
+  under SSH keys. Only the public half of the key you pick is used. Booter looks for an AWS key pair
   that already holds it, matched by fingerprint or public key, and selects it. If there isn't one,
-  Booter imports it, named after the key's SSHBorg label. If AWS already has a different key under
+  Booter imports it, named after the key's label. If AWS already has a different key under
   that name, Booter asks you for another name. AWS only accepts RSA and ED25519 keys.
 
 ## Build
 
 Open this folder in Android Studio and let it sync. It uses the Gradle version set in
 `gradle/wrapper/gradle-wrapper.properties`. Then run the `app` configuration on a device that has a
-fingerprint enrolled. minSdk is 28.
+fingerprint enrolled. minSdk is 28. The terminal, SSH keys, and key bars live in the `sshborg`
+library module.
 
 ## IAM policy for the keys
 

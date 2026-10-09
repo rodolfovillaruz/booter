@@ -26,12 +26,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -39,6 +40,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -72,7 +75,6 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import com.rodolfo.booter.SshBorg
 import com.rodolfo.booter.aws.Ec2Image
 import com.rodolfo.booter.aws.Ec2Instance
 import com.rodolfo.booter.aws.INSTANCE_SIZES
@@ -86,6 +88,9 @@ fun InstancesScreen(
     snackbarHostState: SnackbarHostState,
     onRefresh: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenInstance: (Ec2Instance) -> Unit,
+    onOpenKeys: () -> Unit,
+    onOpenKeyBars: () -> Unit,
     onStart: (Ec2Instance, String) -> Unit,
     onResize: (Ec2Instance, String) -> Unit,
     onCancelResize: (String) -> Unit,
@@ -101,7 +106,7 @@ fun InstancesScreen(
     ) -> Unit,
     onRetryLaunchOptions: () -> Unit,
     onDismissLaunch: () -> Unit,
-    onSshBorgKey: (publicKey: String, label: String) -> Unit,
+    onSavedKey: (publicKey: String, label: String) -> Unit,
     onImportKeyAs: (name: String) -> Unit,
     onCancelKeyImport: () -> Unit,
 ) {
@@ -121,16 +126,6 @@ fun InstancesScreen(
         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
     }
 
-    fun openInSshBorg(instance: Ec2Instance) {
-        val message = when {
-            instance.state != "running" -> "${instance.displayName} isn't running"
-            instance.publicIp == null -> "${instance.displayName} has no public IP"
-            SshBorg.open(context, instance) -> return
-            else -> "SSHBorg isn't installed"
-        }
-        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-    }
-
     Scaffold(
         topBar = {
             TopAppBar(
@@ -146,7 +141,21 @@ fun InstancesScreen(
                 },
                 actions = {
                     IconButton(onClick = onRefresh) { Icon(Icons.Filled.Refresh, contentDescription = "Refresh") }
-                    IconButton(onClick = onOpenSettings) { Icon(Icons.Filled.Settings, contentDescription = "Settings") }
+                    IconButton(onClick = onOpenKeys) { Icon(Icons.Filled.Key, contentDescription = "SSH keys") }
+                    Box {
+                        var menuOpen by remember { mutableStateOf(false) }
+                        IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Key bars") },
+                                onClick = { menuOpen = false; onOpenKeyBars() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("AWS settings") },
+                                onClick = { menuOpen = false; onOpenSettings() },
+                            )
+                        }
+                    }
                 },
             )
         },
@@ -172,7 +181,7 @@ fun InstancesScreen(
             ) {
                 item {
                     Text(
-                        "Tap or swipe right to open in SSHBorg · long-press to copy public IP · swipe left to start, or to resize a running instance",
+                        "Tap or swipe right to open a terminal · long-press to copy public IP · swipe left to start, or to resize a running instance",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -194,7 +203,7 @@ fun InstancesScreen(
                         onStartRequest = { startTarget = instance },
                         onResizeRequest = { resizeTarget = instance },
                         onCancelResize = { onCancelResize(instance.id) },
-                        onOpen = { openInSshBorg(instance) },
+                        onOpen = { onOpenInstance(instance) },
                         onLongClick = { copyPublicIp(instance) },
                     )
                 }
@@ -233,7 +242,7 @@ fun InstancesScreen(
     state.shutdownNotice?.let { ShutdownNoticeDialog(it, onDismissShutdownNotice) }
 
     state.launchOptions?.let {
-        LaunchDialog(it, onLaunch, onRetryLaunchOptions, onDismissLaunch, onSshBorgKey, onImportKeyAs, onCancelKeyImport)
+        LaunchDialog(it, onLaunch, onRetryLaunchOptions, onDismissLaunch, onSavedKey, onOpenKeys, onImportKeyAs, onCancelKeyImport)
     }
 }
 
@@ -254,7 +263,7 @@ private fun InstanceRow(
     // A pending resize boots the instance on its own, so it can't be started or resized meanwhile.
     val canStart = instance.state == "stopped" && !busy && pendingSize == null
     val canResize = instance.state == "running" && !busy && pendingSize == null
-    // Opening stays available during a pending resize: SSHBorg is where you shut it down.
+    // Opening stays available during a pending resize: the terminal is where you shut it down.
     val canOpen = instance.state == "running"
 
     SwipeableRow(
@@ -263,7 +272,7 @@ private fun InstanceRow(
             canResize -> SwipeAction("Resize", Icons.Filled.Build, onResizeRequest)
             else -> null
         },
-        right = if (canOpen) SwipeAction("SSHBorg", Icons.AutoMirrored.Filled.ExitToApp, onOpen) else null,
+        right = if (canOpen) SwipeAction("Terminal", Icons.Filled.Terminal, onOpen) else null,
     ) {
         InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onOpen, onLongClick)
     }

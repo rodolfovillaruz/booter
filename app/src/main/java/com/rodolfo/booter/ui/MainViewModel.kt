@@ -34,12 +34,12 @@ data class ShutdownNotice(
 )
 
 /**
- * The AWS key pair holding the key picked in SSHBorg, which the dialog selects. Not a data class,
+ * The AWS key pair holding the saved key the user picked, which the dialog selects. Not a data class,
  * so picking the same key again is a new value and selects it again.
  */
 class KeyPick(val name: String, val note: String)
 
-/** The SSHBorg key couldn't go in under the name Booter wanted, so the user names it. */
+/** The saved key couldn't go in under the name Booter wanted, so the user names it. */
 data class KeyNamePrompt(val key: SshPublicKey, val label: String, val suggested: String, val error: String)
 
 /** The launch dialog's live options; the dialog is open while this is non-null in [UiState]. */
@@ -51,7 +51,7 @@ data class LaunchOptions(
     val securityGroups: List<Ec2SecurityGroup> = emptyList(),
     val error: String? = null,
     val launching: Boolean = false,
-    /** Looking for (or importing) the key picked in SSHBorg. */
+    /** Looking for (or importing) the saved key the user picked. */
     val keyBusy: Boolean = false,
     val keyPick: KeyPick? = null,
     val keyError: String? = null,
@@ -255,15 +255,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Selects the AWS key pair holding the key the user picked in SSHBorg, matched by
+     * Selects the AWS key pair holding the saved key the user picked, matched by
      * fingerprint or public key. When there isn't one, the key is imported, named after its
-     * SSHBorg label; if that name already holds a different key, the user is asked for another.
+     * label; if that name already holds a different key, the user is asked for another.
      */
-    fun useSshBorgKey(publicKeyLine: String, label: String) {
+    fun useSavedKey(publicKeyLine: String, label: String) {
         val ec2 = client ?: return
         val key = SshPublicKey.parse(publicKeyLine)
         val problem = when {
-            key == null -> "SSHBorg sent a key Booter can't read"
+            key == null -> "Booter can't read that key"
             !key.awsAccepts -> "AWS only takes RSA and ED25519 keys, and \"$label\" is ${key.type}"
             else -> null
         }
@@ -281,7 +281,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val name = keyPairName(label)
                 when {
                     match != null -> updateLaunch {
-                        it.copy(keyBusy = false, keyPick = KeyPick(match.name, "Your SSHBorg key \"$label\", already in AWS"))
+                        it.copy(keyBusy = false, keyPick = KeyPick(match.name, "Your key \"$label\", already in AWS"))
                     }
                     pairs.any { it.name == name } -> askForKeyName(key, label, name, pairs)
                     else -> importKey(ec2, key, name, label)
@@ -310,7 +310,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             updateLaunch { o ->
                 o.copy(
                     keyPairs = (o.keyPairs.filter { it.name != pair.name } + pair).sortedBy { it.name.lowercase() },
-                    keyPick = KeyPick(pair.name, "Your SSHBorg key \"$label\", just added to AWS"),
+                    keyPick = KeyPick(pair.name, "Your key \"$label\", just added to AWS"),
                     keyNamePrompt = null,
                     keyBusy = false,
                 )

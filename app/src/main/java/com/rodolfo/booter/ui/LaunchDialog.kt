@@ -2,10 +2,6 @@
 
 package com.rodolfo.booter.ui
 
-import android.content.ActivityNotFoundException
-import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,9 +31,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.rodolfo.booter.SshBorg
 import com.rodolfo.booter.aws.Ec2Image
 import com.rodolfo.booter.aws.INSTANCE_SIZES
 
@@ -55,7 +49,8 @@ fun LaunchDialog(
     ) -> Unit,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
-    onSshBorgKey: (publicKey: String, label: String) -> Unit,
+    onSavedKey: (publicKey: String, label: String) -> Unit,
+    onManageKeys: () -> Unit,
     onImportKeyAs: (name: String) -> Unit,
     onCancelKeyImport: () -> Unit,
 ) {
@@ -67,19 +62,16 @@ fun LaunchDialog(
     var subnetId by rememberSaveable { mutableStateOf<String?>(null) }
     var groupId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // A key picked in SSHBorg selects the AWS key pair that holds it.
+    // A saved key, once picked, selects the AWS key pair that holds it.
     LaunchedEffect(options.keyPick) { options.keyPick?.let { keyChoice = it.name } }
-    val context = LocalContext.current
-    val sshBorgPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        SshBorg.pickedKey(result)?.let { (key, label) -> onSshBorgKey(key, label) }
-    }
+    var pickingKey by rememberSaveable { mutableStateOf(false) }
 
     val image = options.images.find { it.id == imageId } ?: options.images.firstOrNull()
     val keyName = (keyChoice ?: options.keyPairs.firstOrNull()?.name)?.takeIf { it.isNotEmpty() }
     // Null only when the region has no VPCs at all, and then there's nothing to launch into.
     val subnet = options.subnets.find { it.id == subnetId } ?: options.subnets.firstOrNull()
     // Groups belong to a VPC, so only the subnet's VPC's groups can be used. Until the user picks,
-    // prefer one SSHBorg can get through.
+    // prefer one SSH can get through.
     val groups = options.securityGroups.filter { it.vpcId == subnet?.vpcId }
     val group = groups.find { it.id == groupId }
         ?: groups.firstOrNull { it.allowsSsh }
@@ -140,23 +132,15 @@ fun LaunchDialog(
                         label = "Key pair",
                         selected = keyName ?: "No key pair",
                         choices = options.keyPairs.map { it.name to it.name } +
-                            ("" to "No key pair") + (FROM_SSHBORG to "Use a key from SSHBorg…"),
+                            ("" to "No key pair") + (FROM_SAVED_KEYS to "Use one of your SSH keys…"),
                         supporting = when {
-                            options.keyBusy -> "Looking for your SSHBorg key in AWS…"
+                            options.keyBusy -> "Looking for your key in AWS…"
                             keyName != null && keyName == options.keyPick?.name -> options.keyPick?.note
                             keyName == null -> "You won't be able to SSH in"
                             else -> null
                         },
                         onPick = {
-                            if (it != FROM_SSHBORG) {
-                                keyChoice = it
-                            } else {
-                                try {
-                                    sshBorgPicker.launch(SshBorg.pickKeyIntent())
-                                } catch (e: ActivityNotFoundException) {
-                                    Toast.makeText(context, "This SSHBorg can't share keys yet, or isn't installed", Toast.LENGTH_SHORT).show()
-                                }
-                            }
+                            if (it != FROM_SAVED_KEYS) keyChoice = it else pickingKey = true
                         },
                     )
                     options.keyError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -186,7 +170,7 @@ fun LaunchDialog(
                             supporting = if (group.allowsSsh) {
                                 "${group.id} · allows SSH"
                             } else {
-                                "${group.id} · no inbound SSH rule, so SSHBorg can't connect"
+                                "${group.id} · no inbound SSH rule, so SSH can't connect"
                             },
                             onPick = { groupId = it },
                         )
@@ -218,9 +202,25 @@ fun LaunchDialog(
     )
 
     options.keyNamePrompt?.let { KeyNameDialog(it, options.keyBusy, onImportKeyAs, onCancelKeyImport) }
+
+    if (pickingKey) {
+        SavedKeyPickerDialog(
+            title = "Key for the instance",
+            note = "Only its public half goes to AWS.",
+            onPick = { key ->
+                pickingKey = false
+                publicKeyLine(key)?.let { onSavedKey(it, key.label) }
+            },
+            onManageKeys = {
+                pickingKey = false
+                onManageKeys()
+            },
+            onDismiss = { pickingKey = false },
+        )
+    }
 }
 
-/** Asks what to call the SSHBorg key in AWS, since the name Booter wanted holds another key. */
+/** Asks what to call the saved key in AWS, since the name Booter wanted holds another key. */
 @Composable
 private fun KeyNameDialog(
     prompt: KeyNamePrompt,
@@ -234,7 +234,7 @@ private fun KeyNameDialog(
         title = { Text("Name the key in AWS") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("${prompt.error} Pick a name for your SSHBorg key \"${prompt.label}\".")
+                Text("${prompt.error} Pick a name for your key \"${prompt.label}\".")
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -255,8 +255,8 @@ private fun KeyNameDialog(
     )
 }
 
-/** The key pair picker's entry that opens SSHBorg instead of naming a key pair. */
-private const val FROM_SSHBORG = "\u0000sshborg"
+/** The key pair picker's entry that opens the saved keys instead of naming a key pair. */
+private const val FROM_SAVED_KEYS = "\u0000saved"
 
 /** A read-only dropdown; [choices] are (value, label) pairs. */
 @Composable
