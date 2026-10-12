@@ -29,7 +29,23 @@ object Biometrics {
         title: String,
         subtitle: String,
         cipher: Cipher,
-    ): Cipher? {
+    ): Cipher? = prompt(activity, title, subtitle, null, BiometricPrompt.CryptoObject(cipher))?.cryptoObject?.cipher
+
+    /** Shows the fingerprint prompt just to confirm an action. Returns false if the user backed out. */
+    suspend fun confirm(
+        activity: FragmentActivity,
+        title: String,
+        subtitle: String,
+        description: String,
+    ): Boolean = prompt(activity, title, subtitle, description, null) != null
+
+    private suspend fun prompt(
+        activity: FragmentActivity,
+        title: String,
+        subtitle: String,
+        description: String?,
+        crypto: BiometricPrompt.CryptoObject?,
+    ): BiometricPrompt.AuthenticationResult? {
         when (BiometricManager.from(activity).canAuthenticate(BIOMETRIC_STRONG)) {
             BiometricManager.BIOMETRIC_SUCCESS -> Unit
             BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ->
@@ -43,6 +59,7 @@ object Biometrics {
         val info = BiometricPrompt.PromptInfo.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
+            .apply { description?.let(::setDescription) }
             .setAllowedAuthenticators(BIOMETRIC_STRONG)
             .setNegativeButtonText("Cancel")
             .build()
@@ -53,7 +70,7 @@ object Biometrics {
                 ContextCompat.getMainExecutor(activity),
                 object : BiometricPrompt.AuthenticationCallback() {
                     override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                        if (cont.isActive) cont.resume(result.cryptoObject?.cipher)
+                        if (cont.isActive) cont.resume(result)
                     }
 
                     override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
@@ -67,7 +84,7 @@ object Biometrics {
                 },
             )
             cont.invokeOnCancellation { prompt.cancelAuthentication() }
-            prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+            if (crypto != null) prompt.authenticate(info, crypto) else prompt.authenticate(info)
         }
     }
 }

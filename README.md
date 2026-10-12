@@ -21,7 +21,7 @@ A personal Android app for booting EC2 instances.
   the instance down. Once the instance reports `stopped`, Booter changes the type and starts it
   again. This only happens while the app is open and unlocked; a pending resize survives restarts.
 - **Terminate** (the **⋮** menu on an entry): permanently deletes the instance, along with its root
-  disk and any other disk set to delete on termination. You type the instance's name to confirm. AWS
+  disk and any other disk set to delete on termination. It asks for your fingerprint to confirm. AWS
   refuses if the instance has termination protection on.
 - **Launch** (the button at the bottom right): name a new instance and pick its image, size, key
   pair, subnet, and security group. The images (the latest Amazon Linux 2023 and Ubuntu 24.04, plus
