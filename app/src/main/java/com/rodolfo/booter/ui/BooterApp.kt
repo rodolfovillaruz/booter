@@ -62,14 +62,16 @@ fun BooterApp(
             unlock = unlock,
         )
 
-        else -> SshNavigation { ssh ->
+        else -> SshNavigation(state.instances) { ssh ->
             InstancesScreen(
                 state = state,
                 snackbarHostState = snackbarHostState,
                 onRefresh = vm::refresh,
                 onOpenSettings = { showSettings = true },
                 onOpenInstance = ssh.openInstance,
+                onConfigureInstance = ssh.configureInstance,
                 onOpenKeys = ssh.openKeys,
+                onOpenSshDefaults = ssh.openSshDefaults,
                 onOpenKeyBars = ssh.openKeyBars,
                 onStart = vm::start,
                 onResize = vm::requestResize,

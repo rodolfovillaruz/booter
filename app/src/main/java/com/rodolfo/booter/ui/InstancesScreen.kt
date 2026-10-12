@@ -32,7 +32,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -89,7 +89,9 @@ fun InstancesScreen(
     onRefresh: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenInstance: (Ec2Instance) -> Unit,
+    onConfigureInstance: (Ec2Instance) -> Unit,
     onOpenKeys: () -> Unit,
+    onOpenSshDefaults: () -> Unit,
     onOpenKeyBars: () -> Unit,
     onStart: (Ec2Instance, String) -> Unit,
     onResize: (Ec2Instance, String) -> Unit,
@@ -147,6 +149,10 @@ fun InstancesScreen(
                         IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More") }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
+                                text = { Text("SSH defaults") },
+                                onClick = { menuOpen = false; onOpenSshDefaults() },
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Key bars") },
                                 onClick = { menuOpen = false; onOpenKeyBars() },
                             )
@@ -181,7 +187,7 @@ fun InstancesScreen(
             ) {
                 item {
                     Text(
-                        "Tap or swipe right to open a terminal · long-press to copy public IP · swipe left to start, or to resize a running instance",
+                        "Tap to open a terminal · swipe right for SSH settings · long-press to copy public IP · swipe left to start, or to resize a running instance",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -204,6 +210,7 @@ fun InstancesScreen(
                         onResizeRequest = { resizeTarget = instance },
                         onCancelResize = { onCancelResize(instance.id) },
                         onOpen = { onOpenInstance(instance) },
+                        onConfigure = { onConfigureInstance(instance) },
                         onLongClick = { copyPublicIp(instance) },
                     )
                 }
@@ -258,13 +265,12 @@ private fun InstanceRow(
     onResizeRequest: () -> Unit,
     onCancelResize: () -> Unit,
     onOpen: () -> Unit,
+    onConfigure: () -> Unit,
     onLongClick: () -> Unit,
 ) {
     // A pending resize boots the instance on its own, so it can't be started or resized meanwhile.
     val canStart = instance.state == "stopped" && !busy && pendingSize == null
     val canResize = instance.state == "running" && !busy && pendingSize == null
-    // Opening stays available during a pending resize: the terminal is where you shut it down.
-    val canOpen = instance.state == "running"
 
     SwipeableRow(
         left = when {
@@ -272,7 +278,7 @@ private fun InstanceRow(
             canResize -> SwipeAction("Resize", Icons.Filled.Build, onResizeRequest)
             else -> null
         },
-        right = if (canOpen) SwipeAction("Terminal", Icons.Filled.Terminal, onOpen) else null,
+        right = SwipeAction("SSH settings", Icons.Filled.Tune, onConfigure),
     ) {
         InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onOpen, onLongClick)
     }

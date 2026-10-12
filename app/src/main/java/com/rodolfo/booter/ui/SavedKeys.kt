@@ -33,7 +33,10 @@ fun publicKeyLine(key: SshKeyEntity): String? {
     return if (parts.size < 2) null else "${parts[0]} ${parts[1]}"
 }
 
-/** Picks one of the saved keys; [onManageKeys] opens the Keys screen to add one. */
+/**
+ * Picks one of the saved keys; [onManageKeys] opens the Keys screen to add one. [extraOption],
+ * when given, is listed first (e.g. "Use the default key") and picking it calls [onPickExtra].
+ */
 @Composable
 fun SavedKeyPickerDialog(
     title: String,
@@ -41,6 +44,8 @@ fun SavedKeyPickerDialog(
     onPick: (SshKeyEntity) -> Unit,
     onManageKeys: () -> Unit,
     onDismiss: () -> Unit,
+    extraOption: String? = null,
+    onPickExtra: () -> Unit = {},
 ) {
     val keys by rememberSavedKeys()
     AlertDialog(
@@ -50,12 +55,24 @@ fun SavedKeyPickerDialog(
             val list = keys
             when {
                 list == null -> {}
-                list.isEmpty() -> Text("No SSH keys yet. Generate or import one under SSH keys.")
+                list.isEmpty() && extraOption == null -> Text("No SSH keys yet. Generate or import one under SSH keys.")
                 else -> Column {
                     note?.let {
                         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     LazyColumn {
+                        extraOption?.let { option ->
+                            item {
+                                Text(
+                                    option,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable(onClick = onPickExtra)
+                                        .padding(vertical = 12.dp),
+                                )
+                            }
+                        }
                         items(list, key = { it.id }) { key ->
                             Column(
                                 Modifier

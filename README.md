@@ -5,14 +5,20 @@ A personal Android app for booting EC2 instances.
 - **Settings**: enter your AWS access key ID, secret access key, and region. The keys are encrypted
   on-device with an Android Keystore AES-256-GCM key that can only be used after a fingerprint scan.
   If you add or remove a fingerprint, that key is invalidated and you'll need to enter the AWS keys again.
-- **Main list**: shows every non-terminated instance in the region. **Tap** a running instance, or
-  swipe it **right**, to open a terminal on it; **long-press** to copy its public IP.
-- **Terminal**: built in, from [SSHBorg](https://github.com/payne1982/sshborg). The first tap on an
-  instance asks for the username (`ec2-user` on Amazon Linux, `ubuntu` on Ubuntu) and which of your
-  SSH keys to use, then connects. Booter saves that as a host linked to the instance ID, so later
-  taps connect straight away (or go back to the session that's already open) and update the IP,
-  which changes on every start without an Elastic IP. The host key is pinned on the first connect
-  and follows the instance to its new IP.
+- **Main list**: shows every non-terminated instance in the region. **Tap** a running instance to
+  open a terminal on it; swipe any instance **right** for its SSH settings; **long-press** to copy
+  its public IP.
+- **SSH settings** (swipe **right**, running or stopped): the SSH key for that instance, and a
+  **Custom username** checkbox that lets it log in as someone other than the default. Changes save
+  as you make them.
+- **SSH defaults** (the ⋮ menu, or the link at the bottom of SSH settings): the username and key
+  every instance uses unless it sets its own. The username starts as `ec2-user`; Ubuntu images
+  want `ubuntu`.
+- **Terminal**: built in, from [SSHBorg](https://github.com/payne1982/sshborg). A tap connects with
+  the instance's settings, or goes back to the session that's already open; with no key set yet it
+  opens the SSH settings instead. The connection follows the instance's IP, which changes on every
+  start without an Elastic IP. The host key is pinned on the first connect and follows the instance
+  to its new IP.
 - **SSH keys** (the key icon at the top): generate Ed25519, ECDSA, or RSA keys, or import one. They
   live only in Booter.
 - **Key bars** (the ⋮ menu): pick or edit the extra-key bar shown above the keyboard in the terminal.
