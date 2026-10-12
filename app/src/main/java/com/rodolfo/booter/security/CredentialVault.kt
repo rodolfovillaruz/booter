@@ -32,6 +32,11 @@ class CredentialVault(context: Context) {
         get() = prefs.getString(KEY_REGION, DEFAULT_REGION) ?: DEFAULT_REGION
         set(value) = prefs.edit { putString(KEY_REGION, value) }
 
+    /** Blank means no namespace: every instance is listed and launches go untagged. */
+    var namespace: String
+        get() = prefs.getString(KEY_NAMESPACE, "") ?: ""
+        set(value) = prefs.edit { putString(KEY_NAMESPACE, value) }
+
     fun hasCredentials(): Boolean = prefs.contains(KEY_CIPHERTEXT) && prefs.contains(KEY_IV)
 
     fun encryptionCipher(): Cipher {
@@ -132,5 +137,6 @@ class CredentialVault(context: Context) {
         private const val KEY_CIPHERTEXT = "ciphertext"
         private const val KEY_IV = "iv"
         private const val KEY_REGION = "region"
+        private const val KEY_NAMESPACE = "namespace"
     }
 }

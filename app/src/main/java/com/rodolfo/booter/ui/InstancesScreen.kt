@@ -138,7 +138,7 @@ fun InstancesScreen(
                     Column {
                         Text("Booter")
                         Text(
-                            state.region,
+                            listOf(state.region, state.namespace).filter { it.isNotBlank() }.joinToString(" · "),
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -180,7 +180,8 @@ fun InstancesScreen(
                 if (state.loaded && state.instances.isEmpty()) {
                     item {
                         Text(
-                            "No instances in ${state.region}.",
+                            if (state.namespace.isBlank()) "No instances in ${state.region}."
+                            else "No instances in ${state.region} tagged with namespace \"${state.namespace}\".",
                             modifier = Modifier.padding(top = 32.dp).fillMaxWidth(),
                             style = MaterialTheme.typography.bodyLarge,
                         )

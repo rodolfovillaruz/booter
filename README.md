@@ -5,6 +5,9 @@ A personal Android app for booting EC2 instances.
 - **Settings**: enter your AWS access key ID, secret access key, and region. The keys are encrypted
   on-device with an Android Keystore AES-256-GCM key that can only be used after a fingerprint scan.
   If you add or remove a fingerprint, that key is invalidated and you'll need to enter the AWS keys again.
+- **Namespace** (optional, in Settings): when set, the list only shows instances tagged
+  `booter:namespace` with that value, and every instance you launch gets that tag. Leave it blank to
+  see every instance; launches then go untagged. The namespace is shown under the region in the list.
 - **Main list**: shows every non-terminated instance in the region. **Tap** a running instance, or
   swipe it **right**, to open it in [SSHBorg](https://sshborg.com); **long-press** to copy its public IP.
 - **SSHBorg**: the first tap on an instance opens SSHBorg's new-host form, prefilled with the instance
