@@ -37,6 +37,11 @@ class CredentialVault(context: Context) {
         get() = prefs.getString(KEY_NAMESPACE, "") ?: ""
         set(value) = prefs.edit { putString(KEY_NAMESPACE, value) }
 
+    /** OpenSSH public keys added to every launch through cloud-init. Public, so stored as is. */
+    var extraKeys: List<String>
+        get() = prefs.getString(KEY_EXTRA_KEYS, "").orEmpty().lines().filter { it.isNotBlank() }
+        set(value) = prefs.edit { putString(KEY_EXTRA_KEYS, value.joinToString("\n")) }
+
     fun hasCredentials(): Boolean = prefs.contains(KEY_CIPHERTEXT) && prefs.contains(KEY_IV)
 
     fun encryptionCipher(): Cipher {
@@ -138,5 +143,6 @@ class CredentialVault(context: Context) {
         private const val KEY_IV = "iv"
         private const val KEY_REGION = "region"
         private const val KEY_NAMESPACE = "namespace"
+        private const val KEY_EXTRA_KEYS = "extra_keys"
     }
 }

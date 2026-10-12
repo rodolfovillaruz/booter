@@ -11,6 +11,7 @@ import com.rodolfo.booter.aws.AwsCredentials
 import com.rodolfo.booter.aws.Ec2Instance
 import com.rodolfo.booter.security.BiometricUnavailableException
 import com.rodolfo.booter.security.Biometrics
+import com.rodolfo.booter.ui.AppSettings
 import com.rodolfo.booter.ui.BooterApp
 import com.rodolfo.booter.ui.MainViewModel
 import com.rodolfo.booter.ui.theme.BooterTheme
@@ -46,16 +47,16 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    /** Blank key fields mean "keep the current keys, just update the region and namespace". */
-    private suspend fun saveSettings(keyId: String, secret: String, region: String, namespace: String): Boolean {
+    /** Blank key fields mean "keep the current keys, just update the other settings". */
+    private suspend fun saveSettings(keyId: String, secret: String, settings: AppSettings): Boolean {
         if (keyId.isBlank() && secret.isBlank() && vm.state.value.unlocked) {
-            vm.updateSettings(region, namespace)
+            vm.updateSettings(settings)
             return true
         }
         return try {
             val authed = authenticate("Encrypt AWS keys", "Lock them to your fingerprint", vm.cipherForSave())
                 ?: return false
-            vm.saveCredentials(authed, AwsCredentials(keyId, secret), region, namespace)
+            vm.saveCredentials(authed, AwsCredentials(keyId, secret), settings)
             true
         } catch (e: CancellationException) {
             throw e

@@ -43,12 +43,16 @@ data class LaunchOptions(
     val clientToken: String = UUID.randomUUID().toString(),
 )
 
+/** What the settings screen saves besides the AWS keys. */
+data class AppSettings(val region: String, val namespace: String, val extraKeys: List<String>)
+
 data class UiState(
     val hasCredentials: Boolean = false,
     val unlocked: Boolean = false,
     val region: String = CredentialVault.DEFAULT_REGION,
     /** Blank lists every instance; otherwise only those tagged with it. */
     val namespace: String = "",
+    val extraKeys: List<String> = emptyList(),
     val maskedKeyId: String? = null,
     val instances: List<Ec2Instance> = emptyList(),
     val loaded: Boolean = false,
@@ -74,6 +78,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             hasCredentials = vault.hasCredentials(),
             region = vault.region,
             namespace = vault.namespace,
+            extraKeys = vault.extraKeys,
             pendingResizes = pendingStore.all(),
         ),
     )
@@ -94,24 +99,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             .onFailure { showMessage("Couldn't decrypt your keys: ${it.message}") }
     }
 
-    fun saveCredentials(authenticatedCipher: Cipher, creds: AwsCredentials, region: String, namespace: String) {
+    fun saveCredentials(authenticatedCipher: Cipher, creds: AwsCredentials, settings: AppSettings) {
         vault.encrypt(authenticatedCipher, creds)
-        vault.region = region
-        vault.namespace = namespace
-        _state.update {
-            it.copy(hasCredentials = true, region = region, namespace = namespace, instances = emptyList(), loaded = false)
-        }
+        persist(settings)
+        _state.update { it.copy(hasCredentials = true, instances = emptyList(), loaded = false) }
         onCredentialsReady(creds)
         showMessage("Keys encrypted with your fingerprint")
     }
 
-    fun updateSettings(region: String, namespace: String) {
+    fun updateSettings(settings: AppSettings) {
         val s = _state.value
-        if (region == s.region && namespace == s.namespace) return
-        vault.region = region
-        vault.namespace = namespace
-        _state.update { it.copy(region = region, namespace = namespace, instances = emptyList(), loaded = false) }
-        refresh()
+        val listChanged = settings.region != s.region || settings.namespace != s.namespace
+        persist(settings)
+        // Extra keys only matter for the next launch.
+        if (listChanged) {
+            _state.update { it.copy(instances = emptyList(), loaded = false) }
+            refresh()
+        }
+    }
+
+    private fun persist(settings: AppSettings) {
+        vault.region = settings.region
+        vault.namespace = settings.namespace
+        vault.extraKeys = settings.extraKeys
+        _state.update {
+            it.copy(region = settings.region, namespace = settings.namespace, extraKeys = settings.extraKeys)
+        }
     }
 
     fun onKeyInvalidated() {
@@ -244,16 +257,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         keyName: String?,
         subnetId: String,
         securityGroupId: String?,
+        includeExtraKeys: Boolean,
     ) {
         val ec2 = client ?: return
         val options = _state.value.launchOptions ?: return
+        val extraKeys = if (includeExtraKeys) _state.value.extraKeys else emptyList()
         if (options.launching) return
         _state.update { it.copy(launchOptions = options.copy(launching = true)) }
         viewModelScope.launch {
             try {
                 val instance = ec2.runInstance(
                     name.trim(), image.id, size, keyName, subnetId, securityGroupId,
-                    _state.value.namespace, options.clientToken,
+                    _state.value.namespace, extraKeys, options.clientToken,
                 )
                 _state.update { s ->
                     val others = s.instances.filter { it.id != instance.id }

@@ -98,6 +98,7 @@ fun InstancesScreen(
         keyName: String?,
         subnetId: String,
         securityGroupId: String?,
+        includeExtraKeys: Boolean,
     ) -> Unit,
     onRetryLaunchOptions: () -> Unit,
     onDismissLaunch: () -> Unit,
@@ -220,7 +221,7 @@ fun InstancesScreen(
 
     state.shutdownNotice?.let { ShutdownNoticeDialog(it, onDismissShutdownNotice) }
 
-    state.launchOptions?.let { LaunchDialog(it, onLaunch, onRetryLaunchOptions, onDismissLaunch) }
+    state.launchOptions?.let { LaunchDialog(it, onLaunch, state.extraKeys.size, onRetryLaunchOptions, onDismissLaunch) }
 }
 
 private enum class SwipeDirection { Left, Right }

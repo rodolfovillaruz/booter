@@ -8,6 +8,11 @@ A personal Android app for booting EC2 instances.
 - **Namespace** (optional, in Settings): when set, the list only shows instances tagged
   `booter:namespace` with that value, and every instance you launch gets that tag. Leave it blank to
   see every instance; launches then go untagged. The namespace is shown under the region in the list.
+- **Extra SSH keys** (optional, in Settings): OpenSSH public keys, one per line. AWS allows only one
+  key pair per instance, so Booter passes these as cloud-config user data and cloud-init adds them to
+  the default user's `authorized_keys` (`ec2-user`, `ubuntu`, ...) on first boot, next to the key pair.
+  This only happens on first boot: to change the keys later, edit `authorized_keys` on the instance.
+  The image needs cloud-init, which both stock images and most Linux AMIs have.
 - **Main list**: shows every non-terminated instance in the region.
 - **Start** (the button, or swipe an entry **left**): pick `t3.micro` or `t3.large` every time. If the
   size you pick is different, Booter changes the instance type first and then starts it.
@@ -25,7 +30,8 @@ A personal Android app for booting EC2 instances.
   does is preselected. If none does, `default` is preselected, but it only allows traffic from
   itself, so you can't SSH in. The instance always gets a public IP (it still needs a subnet
   routed to an internet gateway to be reachable) and the image's default disk. Shutting it down
-  from inside the OS stops it rather than terminating it.
+  from inside the OS stops it rather than terminating it. When extra SSH keys are saved, a
+  checkbox (on by default) adds them to the launch.
 
 ## Build
 

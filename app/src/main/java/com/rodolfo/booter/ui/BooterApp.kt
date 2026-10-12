@@ -20,7 +20,7 @@ import kotlinx.coroutines.delay
 fun BooterApp(
     vm: MainViewModel,
     unlock: suspend () -> Unit,
-    saveSettings: suspend (keyId: String, secret: String, region: String, namespace: String) -> Boolean,
+    saveSettings: suspend (keyId: String, secret: String, settings: AppSettings) -> Boolean,
     terminate: (Ec2Instance) -> Unit,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()

@@ -6,6 +6,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.net.URL
 import java.net.URLEncoder
+import java.util.Base64
 import javax.net.ssl.HttpsURLConnection
 
 /** Talks to the EC2 Query API directly over HTTPS, signed with SigV4. */
@@ -94,7 +95,7 @@ class Ec2Client(
      * group when null) and a public IP, so it can be reached over SSH even in a subnet that
      * doesn't hand them out by default. Reusing the same [clientToken] makes a repeated call
      * return the first launch instead of starting another. A non-blank [namespace] goes on as
-     * the [NAMESPACE_TAG] tag.
+     * the [NAMESPACE_TAG] tag, and [extraKeys] go in as cloud-config user data.
      */
     suspend fun runInstance(
         name: String,
@@ -104,6 +105,7 @@ class Ec2Client(
         subnetId: String,
         securityGroupId: String?,
         namespace: String,
+        extraKeys: List<String>,
         clientToken: String,
     ): Ec2Instance {
         val params = buildMap {
@@ -120,6 +122,9 @@ class Ec2Client(
             put("NetworkInterface.1.SubnetId", subnetId)
             put("NetworkInterface.1.AssociatePublicIpAddress", "true")
             securityGroupId?.let { put("NetworkInterface.1.SecurityGroupId.1", it) }
+            if (extraKeys.isNotEmpty()) {
+                put("UserData", Base64.getEncoder().encodeToString(cloudConfig(extraKeys).toByteArray()))
+            }
             val tags = buildList {
                 if (name.isNotBlank()) add("Name" to name)
                 if (namespace.isNotBlank()) add(NAMESPACE_TAG to namespace)

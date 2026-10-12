@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,7 +46,9 @@ fun LaunchDialog(
         keyName: String?,
         subnetId: String,
         securityGroupId: String?,
+        includeExtraKeys: Boolean,
     ) -> Unit,
+    extraKeyCount: Int,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -56,6 +59,8 @@ fun LaunchDialog(
     var keyChoice by rememberSaveable { mutableStateOf<String?>(null) }
     var subnetId by rememberSaveable { mutableStateOf<String?>(null) }
     var groupId by rememberSaveable { mutableStateOf<String?>(null) }
+    var includeExtraKeys by rememberSaveable { mutableStateOf(true) }
+    val addingExtraKeys = includeExtraKeys && extraKeyCount > 0
 
     val image = options.images.find { it.id == imageId } ?: options.images.firstOrNull()
     val keyName = (keyChoice ?: options.keyPairs.firstOrNull())?.takeIf { it.isNotEmpty() }
@@ -123,9 +128,19 @@ fun LaunchDialog(
                         label = "Key pair",
                         selected = keyName ?: "No key pair",
                         choices = options.keyPairs.map { it to it } + ("" to "No key pair"),
-                        supporting = if (keyName == null) "You won't be able to SSH in" else null,
+                        supporting = if (keyName == null && !addingExtraKeys) "You won't be able to SSH in" else null,
                         onPick = { keyChoice = it },
                     )
+
+                    if (extraKeyCount > 0) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = includeExtraKeys, onCheckedChange = { includeExtraKeys = it })
+                            Text(
+                                "Add $extraKeyCount extra SSH ${if (extraKeyCount == 1) "key" else "keys"} from Settings",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                    }
 
                     if (subnet == null) {
                         Text(
@@ -172,7 +187,7 @@ fun LaunchDialog(
                 options.launching -> CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
                 else -> TextButton(
                     onClick = {
-                        if (image != null && subnet != null) onLaunch(name, image, size, keyName, subnet.id, group?.id)
+                        if (image != null && subnet != null) onLaunch(name, image, size, keyName, subnet.id, group?.id, addingExtraKeys)
                     },
                     enabled = ready && image != null && subnet != null,
                 ) { Text("Launch") }

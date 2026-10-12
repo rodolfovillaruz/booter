@@ -31,10 +31,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.rodolfo.booter.aws.isOpenSshPublicKey
 import kotlinx.coroutines.launch
 
 private val REGION_REGEX = Regex("^[a-z]{2}(-[a-z]+)+-\\d+$")
@@ -48,7 +50,7 @@ fun SettingsScreen(
     state: UiState,
     snackbarHostState: SnackbarHostState,
     onBack: (() -> Unit)?,
-    onSave: suspend (keyId: String, secret: String, region: String, namespace: String) -> Boolean,
+    onSave: suspend (keyId: String, secret: String, settings: AppSettings) -> Boolean,
     onSaved: () -> Unit,
     onClear: () -> Unit,
 ) {
@@ -57,6 +59,7 @@ fun SettingsScreen(
     var secret by remember { mutableStateOf("") }
     var region by rememberSaveable { mutableStateOf(state.region) }
     var namespace by rememberSaveable { mutableStateOf(state.namespace) }
+    var extraKeysText by rememberSaveable { mutableStateOf(state.extraKeys.joinToString("\n")) }
     var saving by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -65,7 +68,9 @@ fun SettingsScreen(
     val enteringKeys = mustEnterKeys || keyId.isNotBlank() || secret.isNotBlank()
     val regionValid = REGION_REGEX.matches(region.trim())
     val namespaceValid = NAMESPACE_REGEX.matches(namespace.trim())
-    val canSave = !saving && regionValid && namespaceValid && (!enteringKeys || (keyId.isNotBlank() && secret.isNotBlank()))
+    val extraKeyLines = extraKeysText.lines().map { it.trim() }
+    val badKeyLine = extraKeyLines.indexOfFirst { it.isNotEmpty() && !isOpenSshPublicKey(it) }
+    val canSave = !saving && regionValid && namespaceValid && badKeyLine < 0 && (!enteringKeys || (keyId.isNotBlank() && secret.isNotBlank()))
 
     Scaffold(
         topBar = {
@@ -150,13 +155,35 @@ fun SettingsScreen(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                 modifier = Modifier.fillMaxWidth(),
             )
+            OutlinedTextField(
+                value = extraKeysText,
+                onValueChange = { extraKeysText = it },
+                label = { Text("Extra SSH public keys (optional)") },
+                minLines = 3,
+                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                isError = badKeyLine >= 0,
+                supportingText = {
+                    Text(
+                        if (badKeyLine >= 0) {
+                            "Line ${badKeyLine + 1} isn't an OpenSSH public key"
+                        } else {
+                            "One per line. Added to new instances on first boot, alongside the key pair."
+                        },
+                    )
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             Button(
                 onClick = {
                     scope.launch {
                         saving = true
                         try {
-                            if (onSave(keyId, secret, region.trim(), namespace.trim())) {
+                            if (onSave(
+                                    keyId, secret,
+                                    AppSettings(region.trim(), namespace.trim(), extraKeyLines.filter { it.isNotEmpty() }),
+                                )) {
                                 keyId = ""
                                 secret = ""
                                 onSaved()
