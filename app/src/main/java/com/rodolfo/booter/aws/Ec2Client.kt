@@ -41,6 +41,11 @@ class Ec2Client(
         call("StartInstances", mapOf("InstanceId.1" to instanceId))
     }
 
+    /** Permanent: the instance goes away, along with any volume set to delete on termination. */
+    suspend fun terminateInstance(instanceId: String) {
+        call("TerminateInstances", mapOf("InstanceId.1" to instanceId))
+    }
+
     /** Only allowed while the instance is fully stopped. */
     suspend fun modifyInstanceType(instanceId: String, instanceType: String) {
         call(

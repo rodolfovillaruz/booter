@@ -69,6 +69,7 @@ fun BooterApp(
             onOpenSettings = { showSettings = true },
             onStart = vm::start,
             onResize = vm::requestResize,
+            onTerminate = vm::terminate,
             onCancelResize = vm::cancelResize,
             onDismissShutdownNotice = vm::dismissShutdownNotice,
             onOpenLaunch = vm::openLaunch,

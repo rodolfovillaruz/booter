@@ -170,6 +170,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { startWithSize(ec2, instance, size) }
     }
 
+    fun terminate(instance: Ec2Instance) {
+        val ec2 = client ?: return
+        if (instance.id in _state.value.busyIds) return
+        viewModelScope.launch {
+            setBusy(instance.id, true)
+            try {
+                ec2.terminateInstance(instance.id)
+                // A pending resize could never happen now.
+                pendingStore.remove(instance.id)
+                _state.update { s ->
+                    s.copy(
+                        instances = s.instances.map { if (it.id == instance.id) it.copy(state = "shutting-down") else it },
+                        pendingResizes = pendingStore.all(),
+                    )
+                }
+                showMessage("Terminating ${instance.displayName}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                showMessage("Couldn't terminate ${instance.displayName}: ${e.message}")
+            } finally {
+                setBusy(instance.id, false)
+            }
+        }
+    }
+
     /** Remembers the new size; the instance gets booted with it once the user shuts it down. */
     fun requestResize(instance: Ec2Instance, size: String) {
         val ec2 = client ?: return

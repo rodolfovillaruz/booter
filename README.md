@@ -14,6 +14,9 @@ A personal Android app for booting EC2 instances.
 - **Resize** (swipe a **running** entry **right**): pick the other size. Booter then tells you to shut
   the instance down. Once the instance reports `stopped`, Booter changes the type and starts it
   again. This only happens while the app is open and unlocked; a pending resize survives restarts.
+- **Terminate** (the **⋮** menu on an entry): permanently deletes the instance, along with its root
+  disk and any other disk set to delete on termination. You type the instance's name to confirm. AWS
+  refuses if the instance has termination protection on.
 - **Launch** (the button at the bottom right): name a new instance and pick its image, size, key
   pair, subnet, and security group. The images (the latest Amazon Linux 2023 and Ubuntu 24.04, plus
   your own x86_64 AMIs), key pairs, subnets, and security groups are loaded live from the region, so
@@ -41,6 +44,7 @@ fingerprint enrolled. minSdk is 28.
       "ec2:DescribeInstances",
       "ec2:DescribeInstanceAttribute",
       "ec2:StartInstances",
+      "ec2:TerminateInstances",
       "ec2:ModifyInstanceAttribute",
       "ec2:RunInstances",
       "ec2:CreateTags",
