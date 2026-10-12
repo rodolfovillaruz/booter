@@ -29,6 +29,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -37,6 +39,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -44,6 +48,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -69,7 +74,11 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.rodolfo.booter.SshBorg
@@ -88,6 +97,7 @@ fun InstancesScreen(
     onOpenSettings: () -> Unit,
     onStart: (Ec2Instance, String) -> Unit,
     onResize: (Ec2Instance, String) -> Unit,
+    onTerminate: (Ec2Instance) -> Unit,
     onCancelResize: (String) -> Unit,
     onDismissShutdownNotice: () -> Unit,
     onOpenLaunch: () -> Unit,
@@ -107,6 +117,7 @@ fun InstancesScreen(
 ) {
     var startTarget by remember { mutableStateOf<Ec2Instance?>(null) }
     var resizeTarget by remember { mutableStateOf<Ec2Instance?>(null) }
+    var terminateTarget by remember { mutableStateOf<Ec2Instance?>(null) }
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
 
@@ -194,6 +205,7 @@ fun InstancesScreen(
                         busy = instance.id in state.busyIds,
                         onStartRequest = { startTarget = instance },
                         onResizeRequest = { resizeTarget = instance },
+                        onTerminateRequest = { terminateTarget = instance },
                         onCancelResize = { onCancelResize(instance.id) },
                         onOpen = { openInSshBorg(instance) },
                         onLongClick = { copyPublicIp(instance) },
@@ -231,6 +243,17 @@ fun InstancesScreen(
         )
     }
 
+    terminateTarget?.let { instance ->
+        TerminateDialog(
+            instance = instance,
+            onConfirm = {
+                terminateTarget = null
+                onTerminate(instance)
+            },
+            onDismiss = { terminateTarget = null },
+        )
+    }
+
     state.shutdownNotice?.let { ShutdownNoticeDialog(it, onDismissShutdownNotice) }
 
     state.launchOptions?.let {
@@ -248,6 +271,7 @@ private fun InstanceRow(
     busy: Boolean,
     onStartRequest: () -> Unit,
     onResizeRequest: () -> Unit,
+    onTerminateRequest: () -> Unit,
     onCancelResize: () -> Unit,
     onOpen: () -> Unit,
     onLongClick: () -> Unit,
@@ -257,6 +281,7 @@ private fun InstanceRow(
     val canResize = instance.state == "running" && !busy && pendingSize == null
     // Opening stays available during a pending resize: SSHBorg is where you shut it down.
     val canOpen = instance.state == "running"
+    val canTerminate = !busy && instance.state !in setOf("shutting-down", "terminated")
 
     SwipeableRow(
         left = when {
@@ -266,7 +291,10 @@ private fun InstanceRow(
         },
         right = if (canOpen) SwipeAction("SSHBorg", Icons.AutoMirrored.Filled.ExitToApp, onOpen) else null,
     ) {
-        InstanceCard(instance, pendingSize, busy, canStart, onStartRequest, onCancelResize, onOpen, onLongClick)
+        InstanceCard(
+            instance, pendingSize, busy, canStart, canTerminate,
+            onStartRequest, onTerminateRequest, onCancelResize, onOpen, onLongClick,
+        )
     }
 }
 
@@ -364,11 +392,14 @@ private fun InstanceCard(
     pendingSize: String?,
     busy: Boolean,
     canStart: Boolean,
+    canTerminate: Boolean,
     onStartRequest: () -> Unit,
+    onTerminateRequest: () -> Unit,
     onCancelResize: () -> Unit,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -411,6 +442,22 @@ private fun InstanceCard(
                 OutlinedButton(onClick = onCancelResize) { Text("Cancel") }
             } else {
                 FilledTonalButton(onClick = onStartRequest, enabled = canStart) { Text("Start") }
+            }
+            Box {
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "More for ${instance.displayName}")
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Terminate…", color = MaterialTheme.colorScheme.error) },
+                        leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                        enabled = canTerminate,
+                        onClick = {
+                            menuOpen = false
+                            onTerminateRequest()
+                        },
+                    )
+                }
             }
         }
     }
@@ -468,6 +515,42 @@ private fun SizePickerDialog(
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** Terminating can't be undone, so the user types the instance's name to confirm. */
+@Composable
+private fun TerminateDialog(instance: Ec2Instance, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    var typed by remember { mutableStateOf("") }
+    val matches = typed.trim() == instance.displayName
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Terminate ${instance.displayName}?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "This deletes the instance for good. Its root disk, and any other disk set to " +
+                        "delete on termination, goes with it. It can't be undone.",
+                )
+                Text(buildAnnotatedString {
+                    append("Type ")
+                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(instance.displayName) }
+                    append(" to confirm.")
+                })
+                OutlinedTextField(
+                    value = typed,
+                    onValueChange = { typed = it },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = matches) {
+                Text("Terminate", color = if (matches) MaterialTheme.colorScheme.error else Color.Unspecified)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
