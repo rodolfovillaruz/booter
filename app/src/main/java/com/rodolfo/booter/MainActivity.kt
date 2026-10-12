@@ -6,13 +6,16 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.lifecycleScope
 import com.rodolfo.booter.aws.AwsCredentials
+import com.rodolfo.booter.aws.Ec2Instance
 import com.rodolfo.booter.security.BiometricUnavailableException
 import com.rodolfo.booter.security.Biometrics
 import com.rodolfo.booter.ui.BooterApp
 import com.rodolfo.booter.ui.MainViewModel
 import com.rodolfo.booter.ui.theme.BooterTheme
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import javax.crypto.Cipher
 
 /** FragmentActivity (not plain ComponentActivity) because BiometricPrompt needs it. */
@@ -25,7 +28,7 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
         setContent {
             BooterTheme {
-                BooterApp(vm = vm, unlock = ::unlock, saveSettings = ::saveSettings)
+                BooterApp(vm = vm, unlock = ::unlock, saveSettings = ::saveSettings, terminate = ::terminate)
             }
         }
     }
@@ -59,6 +62,25 @@ class MainActivity : FragmentActivity() {
         } catch (e: Exception) {
             vm.showMessage("Couldn't save keys: ${e.message}")
             false
+        }
+    }
+
+    /** Terminating can't be undone, so it takes a fingerprint. */
+    private fun terminate(instance: Ec2Instance) {
+        lifecycleScope.launch {
+            val confirmed = try {
+                Biometrics.confirm(
+                    this@MainActivity,
+                    "Terminate ${instance.displayName}?",
+                    instance.id,
+                    "This deletes the instance for good, along with its root disk and any other disk " +
+                        "set to delete on termination. It can't be undone.",
+                )
+            } catch (e: BiometricUnavailableException) {
+                vm.showMessage(e.message ?: "Fingerprint unavailable")
+                false
+            }
+            if (confirmed) vm.terminate(instance)
         }
     }
 

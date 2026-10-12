@@ -45,7 +45,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -70,11 +69,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.rodolfo.booter.aws.Ec2Image
@@ -109,7 +104,6 @@ fun InstancesScreen(
 ) {
     var startTarget by remember { mutableStateOf<Ec2Instance?>(null) }
     var resizeTarget by remember { mutableStateOf<Ec2Instance?>(null) }
-    var terminateTarget by remember { mutableStateOf<Ec2Instance?>(null) }
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
 
@@ -187,7 +181,7 @@ fun InstancesScreen(
                         busy = instance.id in state.busyIds,
                         onStartRequest = { startTarget = instance },
                         onResizeRequest = { resizeTarget = instance },
-                        onTerminateRequest = { terminateTarget = instance },
+                        onTerminateRequest = { onTerminate(instance) },
                         onCancelResize = { onCancelResize(instance.id) },
                         onClick = { copyPublicIp(instance) },
                     )
@@ -221,17 +215,6 @@ fun InstancesScreen(
                 onResize(instance, size)
             },
             onDismiss = { resizeTarget = null },
-        )
-    }
-
-    terminateTarget?.let { instance ->
-        TerminateDialog(
-            instance = instance,
-            onConfirm = {
-                terminateTarget = null
-                onTerminate(instance)
-            },
-            onDismiss = { terminateTarget = null },
         )
     }
 
@@ -487,42 +470,6 @@ private fun SizePickerDialog(
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-/** Terminating can't be undone, so the user types the instance's name to confirm. */
-@Composable
-private fun TerminateDialog(instance: Ec2Instance, onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    var typed by remember { mutableStateOf("") }
-    val matches = typed.trim() == instance.displayName
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Terminate ${instance.displayName}?") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "This deletes the instance for good. Its root disk, and any other disk set to " +
-                        "delete on termination, goes with it. It can't be undone.",
-                )
-                Text(buildAnnotatedString {
-                    append("Type ")
-                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(instance.displayName) }
-                    append(" to confirm.")
-                })
-                OutlinedTextField(
-                    value = typed,
-                    onValueChange = { typed = it },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onConfirm, enabled = matches) {
-                Text("Terminate", color = if (matches) MaterialTheme.colorScheme.error else Color.Unspecified)
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 

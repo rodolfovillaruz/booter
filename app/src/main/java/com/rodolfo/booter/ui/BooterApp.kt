@@ -13,6 +13,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import com.rodolfo.booter.aws.Ec2Instance
 import kotlinx.coroutines.delay
 
 @Composable
@@ -20,6 +21,7 @@ fun BooterApp(
     vm: MainViewModel,
     unlock: suspend () -> Unit,
     saveSettings: suspend (keyId: String, secret: String, region: String, namespace: String) -> Boolean,
+    terminate: (Ec2Instance) -> Unit,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -69,7 +71,7 @@ fun BooterApp(
             onOpenSettings = { showSettings = true },
             onStart = vm::start,
             onResize = vm::requestResize,
-            onTerminate = vm::terminate,
+            onTerminate = terminate,
             onCancelResize = vm::cancelResize,
             onDismissShutdownNotice = vm::dismissShutdownNotice,
             onOpenLaunch = vm::openLaunch,
