@@ -15,12 +15,17 @@ class Ec2Client(
 ) {
     private val host = "ec2.$region.amazonaws.com"
 
-    suspend fun describeInstances(): List<Ec2Instance> {
+    /** Only the instances tagged with [namespace], unless it's blank. */
+    suspend fun describeInstances(namespace: String): List<Ec2Instance> {
         val all = mutableListOf<Ec2Instance>()
         var token: String? = null
         do {
             val params = buildMap {
                 put("MaxResults", "100")
+                if (namespace.isNotBlank()) {
+                    put("Filter.1.Name", "tag:$NAMESPACE_TAG")
+                    put("Filter.1.Value.1", namespace)
+                }
                 token?.let { put("NextToken", it) }
             }
             val page = Ec2Xml.parseInstances(call("DescribeInstances", params))
@@ -83,7 +88,8 @@ class Ec2Client(
      * Launches one instance into [subnetId] with the given security group (the VPC's default
      * group when null) and a public IP, so it can be reached over SSH even in a subnet that
      * doesn't hand them out by default. Reusing the same [clientToken] makes a repeated call
-     * return the first launch instead of starting another.
+     * return the first launch instead of starting another. A non-blank [namespace] goes on as
+     * the [NAMESPACE_TAG] tag.
      */
     suspend fun runInstance(
         name: String,
@@ -92,6 +98,7 @@ class Ec2Client(
         keyName: String?,
         subnetId: String,
         securityGroupId: String?,
+        namespace: String,
         clientToken: String,
     ): Ec2Instance {
         val params = buildMap {
@@ -108,10 +115,14 @@ class Ec2Client(
             put("NetworkInterface.1.SubnetId", subnetId)
             put("NetworkInterface.1.AssociatePublicIpAddress", "true")
             securityGroupId?.let { put("NetworkInterface.1.SecurityGroupId.1", it) }
-            if (name.isNotBlank()) {
-                put("TagSpecification.1.ResourceType", "instance")
-                put("TagSpecification.1.Tag.1.Key", "Name")
-                put("TagSpecification.1.Tag.1.Value", name)
+            val tags = buildList {
+                if (name.isNotBlank()) add("Name" to name)
+                if (namespace.isNotBlank()) add(NAMESPACE_TAG to namespace)
+            }
+            if (tags.isNotEmpty()) put("TagSpecification.1.ResourceType", "instance")
+            tags.forEachIndexed { i, (key, value) ->
+                put("TagSpecification.1.Tag.${i + 1}.Key", key)
+                put("TagSpecification.1.Tag.${i + 1}.Value", value)
             }
         }
         val launched = Ec2Xml.parseInstances(call("RunInstances", params)).instances.firstOrNull()

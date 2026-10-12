@@ -48,3 +48,6 @@ val INSTANCE_SIZES: Map<String, String> = linkedMapOf(
     "t3.micro" to "2 vCPU · 1 GiB RAM",
     "t3.large" to "2 vCPU · 8 GiB RAM",
 )
+
+/** The tag that puts an instance in a Booter namespace; its value is the namespace. */
+const val NAMESPACE_TAG = "booter:namespace"

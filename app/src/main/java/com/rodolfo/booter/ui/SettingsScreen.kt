@@ -39,13 +39,16 @@ import kotlinx.coroutines.launch
 
 private val REGION_REGEX = Regex("^[a-z]{2}(-[a-z]+)+-\\d+$")
 
+/** What AWS allows in a tag value. */
+private val NAMESPACE_REGEX = Regex("^[\\p{L}\\p{N} _.:/=+\\-@]{0,256}$")
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     state: UiState,
     snackbarHostState: SnackbarHostState,
     onBack: (() -> Unit)?,
-    onSave: suspend (keyId: String, secret: String, region: String) -> Boolean,
+    onSave: suspend (keyId: String, secret: String, region: String, namespace: String) -> Boolean,
     onSaved: () -> Unit,
     onClear: () -> Unit,
 ) {
@@ -53,6 +56,7 @@ fun SettingsScreen(
     var keyId by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("") }
     var region by rememberSaveable { mutableStateOf(state.region) }
+    var namespace by rememberSaveable { mutableStateOf(state.namespace) }
     var saving by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -60,7 +64,8 @@ fun SettingsScreen(
     val mustEnterKeys = !state.unlocked
     val enteringKeys = mustEnterKeys || keyId.isNotBlank() || secret.isNotBlank()
     val regionValid = REGION_REGEX.matches(region.trim())
-    val canSave = !saving && regionValid && (!enteringKeys || (keyId.isNotBlank() && secret.isNotBlank()))
+    val namespaceValid = NAMESPACE_REGEX.matches(namespace.trim())
+    val canSave = !saving && regionValid && namespaceValid && (!enteringKeys || (keyId.isNotBlank() && secret.isNotBlank()))
 
     Scaffold(
         topBar = {
@@ -127,13 +132,31 @@ fun SettingsScreen(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                 modifier = Modifier.fillMaxWidth(),
             )
+            OutlinedTextField(
+                value = namespace,
+                onValueChange = { namespace = it },
+                label = { Text("Namespace (optional)") },
+                singleLine = true,
+                isError = !namespaceValid,
+                supportingText = {
+                    Text(
+                        if (namespaceValid) {
+                            "Only instances tagged with it are listed, and new ones get it. Leave blank to see all."
+                        } else {
+                            "Letters, numbers, spaces and _ . : / = + - @ only, up to 256"
+                        },
+                    )
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             Button(
                 onClick = {
                     scope.launch {
                         saving = true
                         try {
-                            if (onSave(keyId, secret, region.trim())) {
+                            if (onSave(keyId, secret, region.trim(), namespace.trim())) {
                                 keyId = ""
                                 secret = ""
                                 onSaved()

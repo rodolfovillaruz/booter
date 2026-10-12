@@ -47,6 +47,8 @@ data class UiState(
     val hasCredentials: Boolean = false,
     val unlocked: Boolean = false,
     val region: String = CredentialVault.DEFAULT_REGION,
+    /** Blank lists every instance; otherwise only those tagged with it. */
+    val namespace: String = "",
     val maskedKeyId: String? = null,
     val instances: List<Ec2Instance> = emptyList(),
     val loaded: Boolean = false,
@@ -71,6 +73,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         UiState(
             hasCredentials = vault.hasCredentials(),
             region = vault.region,
+            namespace = vault.namespace,
             pendingResizes = pendingStore.all(),
         ),
     )
@@ -91,18 +94,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             .onFailure { showMessage("Couldn't decrypt your keys: ${it.message}") }
     }
 
-    fun saveCredentials(authenticatedCipher: Cipher, creds: AwsCredentials, region: String) {
+    fun saveCredentials(authenticatedCipher: Cipher, creds: AwsCredentials, region: String, namespace: String) {
         vault.encrypt(authenticatedCipher, creds)
         vault.region = region
-        _state.update { it.copy(hasCredentials = true, region = region, instances = emptyList(), loaded = false) }
+        vault.namespace = namespace
+        _state.update {
+            it.copy(hasCredentials = true, region = region, namespace = namespace, instances = emptyList(), loaded = false)
+        }
         onCredentialsReady(creds)
         showMessage("Keys encrypted with your fingerprint")
     }
 
-    fun updateRegion(region: String) {
-        if (region == _state.value.region) return
+    fun updateSettings(region: String, namespace: String) {
+        val s = _state.value
+        if (region == s.region && namespace == s.namespace) return
         vault.region = region
-        _state.update { it.copy(region = region, instances = emptyList(), loaded = false) }
+        vault.namespace = namespace
+        _state.update { it.copy(region = region, namespace = namespace, instances = emptyList(), loaded = false) }
         refresh()
     }
 
@@ -137,7 +145,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!pollMutex.tryLock()) return
         try {
             if (showSpinner) _state.update { it.copy(refreshing = true) }
-            val instances = ec2.describeInstances()
+            val instances = ec2.describeInstances(_state.value.namespace)
             _state.update { it.copy(instances = instances, loaded = true) }
             resumePendingResizes(ec2, instances)
         } catch (e: CancellationException) {
@@ -218,7 +226,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val instance = ec2.runInstance(
-                    name.trim(), image.id, size, keyName, subnetId, securityGroupId, options.clientToken,
+                    name.trim(), image.id, size, keyName, subnetId, securityGroupId,
+                    _state.value.namespace, options.clientToken,
                 )
                 _state.update { s ->
                     val others = s.instances.filter { it.id != instance.id }
@@ -279,7 +288,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         for ((id, size) in pendingStore.all()) {
             val instance = instances.find { it.id == id }
             if (instance == null) {
-                pendingStore.remove(id) // terminated or gone
+                // Gone or terminated, unless the namespace is just hiding it.
+                if (_state.value.namespace.isBlank()) pendingStore.remove(id)
                 continue
             }
             if (instance.state != "stopped" || id in _state.value.busyIds) continue

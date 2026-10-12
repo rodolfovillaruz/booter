@@ -19,7 +19,7 @@ import kotlinx.coroutines.delay
 fun BooterApp(
     vm: MainViewModel,
     unlock: suspend () -> Unit,
-    saveSettings: suspend (keyId: String, secret: String, region: String) -> Boolean,
+    saveSettings: suspend (keyId: String, secret: String, region: String, namespace: String) -> Boolean,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }

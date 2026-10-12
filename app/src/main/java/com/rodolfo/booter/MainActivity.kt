@@ -43,16 +43,16 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    /** Blank key fields mean "keep the current keys, just update the region". */
-    private suspend fun saveSettings(keyId: String, secret: String, region: String): Boolean {
+    /** Blank key fields mean "keep the current keys, just update the region and namespace". */
+    private suspend fun saveSettings(keyId: String, secret: String, region: String, namespace: String): Boolean {
         if (keyId.isBlank() && secret.isBlank() && vm.state.value.unlocked) {
-            vm.updateRegion(region)
+            vm.updateSettings(region, namespace)
             return true
         }
         return try {
             val authed = authenticate("Encrypt AWS keys", "Lock them to your fingerprint", vm.cipherForSave())
                 ?: return false
-            vm.saveCredentials(authed, AwsCredentials(keyId, secret), region)
+            vm.saveCredentials(authed, AwsCredentials(keyId, secret), region, namespace)
             true
         } catch (e: CancellationException) {
             throw e
