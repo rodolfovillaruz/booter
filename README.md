@@ -13,7 +13,8 @@ A personal Android app for booting EC2 instances.
   the default user's `authorized_keys` (`ec2-user`, `ubuntu`, ...) on first boot, next to the key pair.
   This only happens on first boot: to change the keys later, edit `authorized_keys` on the instance.
   The image needs cloud-init, which both stock images and most Linux AMIs have.
-- **Main list**: shows every non-terminated instance in the region.
+- **Main list**: shows every non-terminated instance in the region. **Tap** an instance to copy its
+  public IP, then paste it into whichever SSH client you like.
 - **Start** (the button, or swipe an entry **left**): pick `t3.micro` or `t3.large` every time. If the
   size you pick is different, Booter changes the instance type first and then starts it.
 - **Resize** (swipe a **running** entry **right**): pick the other size. Booter then tells you to shut
