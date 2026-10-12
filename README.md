@@ -63,3 +63,7 @@ fingerprint enrolled. minSdk is 28.
   }]
 }
 ```
+
+## License
+
+Booter is free software, released under the [GNU General Public License v3.0](LICENSE).
