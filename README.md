@@ -34,6 +34,17 @@ A personal Android app for booting EC2 instances.
   from inside the OS stops it rather than terminating it. When extra SSH keys are saved, a
   checkbox (on by default) adds them to the launch.
 
+## Install
+
+Signed APKs are attached to each [GitHub release](https://github.com/rodolfovillaruz/booter/releases).
+To get updates automatically, add `https://github.com/rodolfovillaruz/booter` to
+[Obtainium](https://github.com/ImranR98/Obtainium). Every release is signed with the same key, so a
+copy installed from Android Studio or signed with another key has to be uninstalled once first.
+
+To cut a release, bump `versionCode` and `versionName` in `app/build.gradle.kts`, commit, and push a
+matching tag (`v` + `versionName`, e.g. `v0.2.0`). The release workflow refuses a tag that doesn't
+match `versionName` or a `versionCode` that isn't higher than the previous release's.
+
 ## Build
 
 Open this folder in Android Studio and let it sync. It uses the Gradle version set in
